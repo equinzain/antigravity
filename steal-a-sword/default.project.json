@@ -1,0 +1,52 @@
+{
+  "name": "VolerUneEpee",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Shared": {
+        "$path": "src/shared"
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "Server": {
+        "$path": "src/server"
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "Client": {
+          "$path": "src/client"
+        }
+      }
+    },
+    "Workspace": {
+      "$className": "Workspace",
+      "$properties": {
+        "FilteringEnabled": true
+      },
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Anchored": true,
+          "Color": [0.25, 0.53, 0.29],
+          "Material": "Grass",
+          "Position": [0, -4, 0],
+          "Size": [600, 8, 600]
+        }
+      }
+    },
+    "Lighting": {
+      "$className": "Lighting",
+      "$properties": {
+        "Ambient": [0.35, 0.38, 0.45],
+        "Brightness": 2.5,
+        "ClockTime": 14.5,
+        "OutdoorAmbient": [0.45, 0.48, 0.55]
+      }
+    }
+  }
+}
