@@ -1,0 +1,4710 @@
+<roblox version="4">
+  <Item class="Lighting" referent="0">
+    <Properties>
+      <string name="Name">Lighting</string>
+      <Color3 name="Ambient">
+        <R>0.35</R>
+        <G>0.38</G>
+        <B>0.45</B>
+      </Color3>
+      <float name="Brightness">2.5</float>
+      <float name="ClockTime">14.5</float>
+      <Color3 name="OutdoorAmbient">
+        <R>0.45</R>
+        <G>0.48</G>
+        <B>0.55</B>
+      </Color3>
+    </Properties>
+  </Item>
+  <Item class="ReplicatedStorage" referent="1">
+    <Properties>
+      <string name="Name">ReplicatedStorage</string>
+    </Properties>
+    <Item class="Folder" referent="2">
+      <Properties>
+        <string name="Name">Shared</string>
+      </Properties>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">GameConfig</string>
+          <string name="Source"><![CDATA[--!strict
+-- Configuration centrale de "Voler une Épée" (Steal a Sword)
+-- Inclut :
+-- - Épées avec revenus $/s aléatoires selon la Zone et la Rareté
+-- - Boutique de Traînées (Sentiers) avec multiplicateurs équilibrés et prix élevés
+-- - 10 Zones avec Gardes AFK dans un coin qui se réveillent au vol d'une Pierre
+
+local GameConfig = {}
+
+export type RarityInfo = {
+	Name: string,
+	Color: Color3,
+	Order: number,
+	StatMultiplier: number, -- Multiplie le jet aléatoire d'argent de la zone
+}
+
+export type SwordTemplate = {
+	Id: string,
+	Name: string,
+	Rarity: string,
+	BladeColor: Color3,
+	HandleColor: Color3,
+	GlowColor: Color3,
+	Scale: number,
+}
+
+-- Instance unique d'une épée possédée par un joueur (avec son revenu $/s aléatoire !)
+export type OwnedSwordItem = {
+	Uid: string,
+	SwordId: string,
+	Name: string,
+	Rarity: string,
+	ZoneOrder: number,
+	MoneyPerSec: number,
+	SellPrice: number,
+}
+
+export type TrailInfo = {
+	Id: string,
+	Name: string,
+	Price: number,
+	SpeedMultiplier: number, -- Multiplicateur raisonnable (ex: 1.15x -> 5.0x)
+	MoneyMultiplier: number, -- Multiplicateur raisonnable (ex: 1.10x -> 4.0x)
+	Color1: Color3,
+	Color2: Color3,
+	Order: number,
+}
+
+export type StoneTier = {
+	Id: string,
+	Name: string,
+	ZoneName: string,
+	ZoneOrder: number,
+	ZoneLength: number,
+	ForgeTime: number,
+	CarrySlowFactor: number,
+	MinBaseMoneyPerSec: number, -- Fourchette aléatoire de base de la zone
+	MaxBaseMoneyPerSec: number,
+	FloorColor: Color3,
+	WallColor: Color3,
+	StoneColor: Color3,
+	CrystalColor: Color3,
+	GuardianName: string,
+	GuardianSpeedStat: number,
+	GuardianColor: Color3,
+	GuardianArmorColor: Color3,
+	GuardianScale: number,
+	DropTable: { [string]: number },
+}
+
+local SUFFIXES = { "K", "M", "B", "T", "Qa", "Qi" }
+function GameConfig.FormatNumber(n: number): string
+	if n < 1000 then
+		return tostring(math.floor(n))
+	end
+	local index = math.min(#SUFFIXES, math.floor(math.log10(n) / 3))
+	local scaled = n / (10 ^ (index * 3))
+	if scaled >= 100 then
+		return string.format("%d%s", math.floor(scaled), SUFFIXES[index])
+	else
+		return string.format("%.1f%s", scaled, SUFFIXES[index]):gsub("%.0", "")
+	end
+end
+
+function GameConfig.FormatTime(seconds: number): string
+	seconds = math.max(0, math.ceil(seconds))
+	if seconds < 60 then
+		return string.format("%ds", seconds)
+	elseif seconds < 3600 then
+		local m = math.floor(seconds / 60)
+		local s = seconds % 60
+		if s == 0 then
+			return string.format("%dm", m)
+		end
+		return string.format("%dm %ds", m, s)
+	else
+		local h = math.floor(seconds / 3600)
+		local m = math.floor((seconds % 3600) / 60)
+		return string.format("%dh %dm", h, m)
+	end
+end
+
+GameConfig.Rarities = {
+	Common = { Name = "Commune", Color = Color3.fromRGB(190, 200, 210), Order = 1, StatMultiplier = 1.0 },
+	Rare = { Name = "Rare", Color = Color3.fromRGB(55, 160, 255), Order = 2, StatMultiplier = 1.45 },
+	Epic = { Name = "Épique", Color = Color3.fromRGB(190, 70, 255), Order = 3, StatMultiplier = 2.1 },
+	Legendary = { Name = "Légendaire", Color = Color3.fromRGB(255, 200, 30), Order = 4, StatMultiplier = 3.2 },
+	Mythic = { Name = "Mythique", Color = Color3.fromRGB(255, 45, 90), Order = 5, StatMultiplier = 5.0 },
+	Secret = { Name = "Secrète", Color = Color3.fromRGB(65, 255, 235), Order = 6, StatMultiplier = 8.5 },
+}
+
+-- Modèles d'épées
+GameConfig.Swords = {
+	WoodenDagger = {
+		Id = "WoodenDagger",
+		Name = "Dague d'Entraînement",
+		Rarity = "Common",
+		BladeColor = Color3.fromRGB(185, 140, 95),
+		HandleColor = Color3.fromRGB(110, 75, 45),
+		GlowColor = Color3.fromRGB(210, 180, 140),
+		Scale = 0.95,
+	},
+	RustySword = {
+		Id = "RustySword",
+		Name = "Épée de Fer Forgé",
+		Rarity = "Common",
+		BladeColor = Color3.fromRGB(175, 185, 195),
+		HandleColor = Color3.fromRGB(95, 65, 45),
+		GlowColor = Color3.fromRGB(210, 215, 225),
+		Scale = 1.0,
+	},
+	StoneBroadsword = {
+		Id = "StoneBroadsword",
+		Name = "Glaive de Roche",
+		Rarity = "Common",
+		BladeColor = Color3.fromRGB(145, 150, 160),
+		HandleColor = Color3.fromRGB(70, 75, 85),
+		GlowColor = Color3.fromRGB(190, 200, 215),
+		Scale = 1.08,
+	},
+	SquireBlade = {
+		Id = "SquireBlade",
+		Name = "Lame du Chevalier",
+		Rarity = "Rare",
+		BladeColor = Color3.fromRGB(120, 195, 255),
+		HandleColor = Color3.fromRGB(45, 85, 145),
+		GlowColor = Color3.fromRGB(150, 215, 255),
+		Scale = 1.12,
+	},
+	GoldenScimitar = {
+		Id = "GoldenScimitar",
+		Name = "Cimeterre des Dunes",
+		Rarity = "Rare",
+		BladeColor = Color3.fromRGB(255, 215, 80),
+		HandleColor = Color3.fromRGB(150, 95, 30),
+		GlowColor = Color3.fromRGB(255, 235, 120),
+		Scale = 1.18,
+	},
+	CobaltSaber = {
+		Id = "CobaltSaber",
+		Name = "Sabre de Cobalt",
+		Rarity = "Rare",
+		BladeColor = Color3.fromRGB(45, 140, 255),
+		HandleColor = Color3.fromRGB(30, 40, 65),
+		GlowColor = Color3.fromRGB(75, 180, 255),
+		Scale = 1.22,
+	},
+	EmeraldClaymore = {
+		Id = "EmeraldClaymore",
+		Name = "Claymore d'Émeraude",
+		Rarity = "Epic",
+		BladeColor = Color3.fromRGB(40, 235, 125),
+		HandleColor = Color3.fromRGB(25, 75, 45),
+		GlowColor = Color3.fromRGB(80, 255, 160),
+		Scale = 1.28,
+	},
+	ForestRapier = {
+		Id = "ForestRapier",
+		Name = "Rapière Sylvestre",
+		Rarity = "Epic",
+		BladeColor = Color3.fromRGB(95, 255, 110),
+		HandleColor = Color3.fromRGB(85, 55, 30),
+		GlowColor = Color3.fromRGB(140, 255, 150),
+		Scale = 1.32,
+	},
+	FrostbiteBlade = {
+		Id = "FrostbiteBlade",
+		Name = "Lame Givrante Polaire",
+		Rarity = "Epic",
+		BladeColor = Color3.fromRGB(110, 235, 255),
+		HandleColor = Color3.fromRGB(40, 95, 150),
+		GlowColor = Color3.fromRGB(175, 245, 255),
+		Scale = 1.36,
+	},
+	GlacierCleaver = {
+		Id = "GlacierCleaver",
+		Name = "Fendoir des Glaces",
+		Rarity = "Epic",
+		BladeColor = Color3.fromRGB(70, 200, 255),
+		HandleColor = Color3.fromRGB(30, 60, 110),
+		GlowColor = Color3.fromRGB(130, 225, 255),
+		Scale = 1.42,
+	},
+	AmethystKatana = {
+		Id = "AmethystKatana",
+		Name = "Katana d'Améthyste",
+		Rarity = "Legendary",
+		BladeColor = Color3.fromRGB(190, 65, 255),
+		HandleColor = Color3.fromRGB(50, 20, 75),
+		GlowColor = Color3.fromRGB(220, 120, 255),
+		Scale = 1.46,
+	},
+	CrystalReaver = {
+		Id = "CrystalReaver",
+		Name = "Faucheuse de Cristal",
+		Rarity = "Legendary",
+		BladeColor = Color3.fromRGB(235, 85, 255),
+		HandleColor = Color3.fromRGB(75, 25, 95),
+		GlowColor = Color3.fromRGB(255, 150, 255),
+		Scale = 1.52,
+	},
+	MagmaReaper = {
+		Id = "MagmaReaper",
+		Name = "Brise-Monde Magmatique",
+		Rarity = "Legendary",
+		BladeColor = Color3.fromRGB(255, 95, 25),
+		HandleColor = Color3.fromRGB(55, 20, 15),
+		GlowColor = Color3.fromRGB(255, 140, 45),
+		Scale = 1.58,
+	},
+	SolarExcalibur = {
+		Id = "SolarExcalibur",
+		Name = "Excalibur Solaire",
+		Rarity = "Legendary",
+		BladeColor = Color3.fromRGB(255, 215, 40),
+		HandleColor = Color3.fromRGB(165, 95, 20),
+		GlowColor = Color3.fromRGB(255, 240, 115),
+		Scale = 1.64,
+	},
+	ShadowScythe = {
+		Id = "ShadowScythe",
+		Name = "Lame de l'Ombre Noire",
+		Rarity = "Mythic",
+		BladeColor = Color3.fromRGB(130, 35, 210),
+		HandleColor = Color3.fromRGB(20, 15, 30),
+		GlowColor = Color3.fromRGB(185, 75, 255),
+		Scale = 1.70,
+	},
+	Voidbreaker = {
+		Id = "Voidbreaker",
+		Name = "Fendeuse du Néant",
+		Rarity = "Mythic",
+		BladeColor = Color3.fromRGB(255, 30, 90),
+		HandleColor = Color3.fromRGB(25, 10, 35),
+		GlowColor = Color3.fromRGB(255, 70, 130),
+		Scale = 1.76,
+	},
+	NebulaStarblade = {
+		Id = "NebulaStarblade",
+		Name = "Lame Stellaire Cosmique",
+		Rarity = "Mythic",
+		BladeColor = Color3.fromRGB(95, 120, 255),
+		HandleColor = Color3.fromRGB(30, 25, 75),
+		GlowColor = Color3.fromRGB(150, 180, 255),
+		Scale = 1.84,
+	},
+	GalaxySlayer = {
+		Id = "GalaxySlayer",
+		Name = "Pourfendeuse Galactique",
+		Rarity = "Secret",
+		BladeColor = Color3.fromRGB(255, 65, 225),
+		HandleColor = Color3.fromRGB(45, 15, 65),
+		GlowColor = Color3.fromRGB(255, 140, 245),
+		Scale = 1.92,
+	},
+	CelestialArchblade = {
+		Id = "CelestialArchblade",
+		Name = "Arche-Lame Céleste",
+		Rarity = "Secret",
+		BladeColor = Color3.fromRGB(85, 255, 240),
+		HandleColor = Color3.fromRGB(255, 225, 110),
+		GlowColor = Color3.fromRGB(165, 255, 250),
+		Scale = 2.05,
+	},
+	OmegaGodsword = {
+		Id = "OmegaGodsword",
+		Name = "Épée Suprême de l'Infini",
+		Rarity = "Secret",
+		BladeColor = Color3.fromRGB(255, 250, 140),
+		HandleColor = Color3.fromRGB(255, 80, 120),
+		GlowColor = Color3.fromRGB(255, 255, 210),
+		Scale = 2.20,
+	},
+}
+
+-- Boutique de Traînées (Sentiers) : Prix de plus en plus chers, multiplicateurs de vitesse et d'argent équilibrés !
+GameConfig.Trails = {
+	{
+		Id = "WindTrail",
+		Name = "Sentier du Vent",
+		Price = 500,
+		SpeedMultiplier = 1.15,
+		MoneyMultiplier = 1.10,
+		Color1 = Color3.fromRGB(210, 245, 255),
+		Color2 = Color3.fromRGB(140, 215, 255),
+		Order = 1,
+	},
+	{
+		Id = "EmeraldTrail",
+		Name = "Sentier d'Émeraude",
+		Price = 5000, -- $5K
+		SpeedMultiplier = 1.30,
+		MoneyMultiplier = 1.25,
+		Color1 = Color3.fromRGB(65, 255, 120),
+		Color2 = Color3.fromRGB(20, 180, 75),
+		Order = 2,
+	},
+	{
+		Id = "FlameTrail",
+		Name = "Sentier de Flammes",
+		Price = 75000, -- $75K
+		SpeedMultiplier = 1.50,
+		MoneyMultiplier = 1.45,
+		Color1 = Color3.fromRGB(255, 195, 45),
+		Color2 = Color3.fromRGB(255, 65, 20),
+		Order = 3,
+	},
+	{
+		Id = "FrostTrail",
+		Name = "Sentier Glacial",
+		Price = 1200000, -- $1.2M
+		SpeedMultiplier = 1.75,
+		MoneyMultiplier = 1.70,
+		Color1 = Color3.fromRGB(120, 245, 255),
+		Color2 = Color3.fromRGB(35, 130, 255),
+		Order = 4,
+	},
+	{
+		Id = "AmethystTrail",
+		Name = "Sentier d'Améthyste",
+		Price = 25000000, -- $25M
+		SpeedMultiplier = 2.10,
+		MoneyMultiplier = 2.00,
+		Color1 = Color3.fromRGB(220, 110, 255),
+		Color2 = Color3.fromRGB(130, 30, 220),
+		Order = 5,
+	},
+	{
+		Id = "SolarTrail",
+		Name = "Sentier Solaire Royal",
+		Price = 600000000, -- $600M
+		SpeedMultiplier = 2.50,
+		MoneyMultiplier = 2.40,
+		Color1 = Color3.fromRGB(255, 245, 120),
+		Color2 = Color3.fromRGB(255, 165, 20),
+		Order = 6,
+	},
+	{
+		Id = "VoidTrail",
+		Name = "Sentier du Néant",
+		Price = 18000000000, -- $18B
+		SpeedMultiplier = 3.00,
+		MoneyMultiplier = 2.90,
+		Color1 = Color3.fromRGB(255, 40, 100),
+		Color2 = Color3.fromRGB(35, 10, 55),
+		Order = 7,
+	},
+	{
+		Id = "CelestialTrail",
+		Name = "Sentier Céleste Infini",
+		Price = 750000000000, -- $750B
+		SpeedMultiplier = 3.80,
+		MoneyMultiplier = 3.50,
+		Color1 = Color3.fromRGB(85, 255, 240),
+		Color2 = Color3.fromRGB(255, 220, 95),
+		Order = 8,
+	},
+}
+
+-- Les 10 Zones avec fourchettes d'argent aléatoires croissantes !
+GameConfig.StoneTiers = {
+	{
+		Id = "Zone1Stone",
+		Name = "Pierre d'Épée de Bois",
+		ZoneName = "Zone 1 : Prairie Paisible",
+		ZoneOrder = 1,
+		ZoneLength = 150,
+		ForgeTime = 15,
+		CarrySlowFactor = 0.78,
+		MinBaseMoneyPerSec = 8,
+		MaxBaseMoneyPerSec = 28,
+		FloorColor = Color3.fromRGB(105, 195, 75),
+		WallColor = Color3.fromRGB(165, 125, 80),
+		StoneColor = Color3.fromRGB(145, 110, 75),
+		CrystalColor = Color3.fromRGB(130, 235, 100),
+		GuardianName = "Sentinelle des Bois",
+		GuardianSpeedStat = 35,
+		GuardianColor = Color3.fromRGB(140, 100, 65),
+		GuardianArmorColor = Color3.fromRGB(90, 135, 65),
+		GuardianScale = 1.25,
+		DropTable = {
+			WoodenDagger = 65,
+			RustySword = 28,
+			StoneBroadsword = 7,
+		},
+	},
+	{
+		Id = "Zone2Stone",
+		Name = "Pierre d'Épée de Fer",
+		ZoneName = "Zone 2 : Vallée Rocheuse",
+		ZoneOrder = 2,
+		ZoneLength = 190,
+		ForgeTime = 45,
+		CarrySlowFactor = 0.74,
+		MinBaseMoneyPerSec = 55,
+		MaxBaseMoneyPerSec = 190,
+		FloorColor = Color3.fromRGB(140, 150, 160),
+		WallColor = Color3.fromRGB(100, 105, 115),
+		StoneColor = Color3.fromRGB(115, 120, 130),
+		CrystalColor = Color3.fromRGB(130, 200, 255),
+		GuardianName = "Chevalier d'Acier",
+		GuardianSpeedStat = 180,
+		GuardianColor = Color3.fromRGB(135, 145, 160),
+		GuardianArmorColor = Color3.fromRGB(70, 80, 95),
+		GuardianScale = 1.35,
+		DropTable = {
+			RustySword = 50,
+			StoneBroadsword = 35,
+			SquireBlade = 15,
+		},
+	},
+	{
+		Id = "Zone3Stone",
+		Name = "Pierre d'Épée des Sables",
+		ZoneName = "Zone 3 : Désert Doré",
+		ZoneOrder = 3,
+		ZoneLength = 240,
+		ForgeTime = 120,
+		CarrySlowFactor = 0.70,
+		MinBaseMoneyPerSec = 380,
+		MaxBaseMoneyPerSec = 1350,
+		FloorColor = Color3.fromRGB(230, 195, 110),
+		WallColor = Color3.fromRGB(190, 145, 70),
+		StoneColor = Color3.fromRGB(185, 145, 80),
+		CrystalColor = Color3.fromRGB(255, 215, 65),
+		GuardianName = "Gardien Pharaon",
+		GuardianSpeedStat = 950,
+		GuardianColor = Color3.fromRGB(235, 185, 60),
+		GuardianArmorColor = Color3.fromRGB(45, 115, 185),
+		GuardianScale = 1.45,
+		DropTable = {
+			StoneBroadsword = 42,
+			SquireBlade = 38,
+			GoldenScimitar = 16,
+			CobaltSaber = 4,
+		},
+	},
+	{
+		Id = "Zone4Stone",
+		Name = "Pierre d'Épée Sylvestre",
+		ZoneName = "Zone 4 : Jungle d'Émeraude",
+		ZoneOrder = 4,
+		ZoneLength = 300,
+		ForgeTime = 270,
+		CarrySlowFactor = 0.66,
+		MinBaseMoneyPerSec = 2800,
+		MaxBaseMoneyPerSec = 9800,
+		FloorColor = Color3.fromRGB(50, 160, 85),
+		WallColor = Color3.fromRGB(35, 110, 55),
+		StoneColor = Color3.fromRGB(45, 105, 65),
+		CrystalColor = Color3.fromRGB(65, 255, 140),
+		GuardianName = "Colosse d'Émeraude",
+		GuardianSpeedStat = 5000,
+		GuardianColor = Color3.fromRGB(45, 185, 95),
+		GuardianArmorColor = Color3.fromRGB(25, 85, 45),
+		GuardianScale = 1.55,
+		DropTable = {
+			GoldenScimitar = 40,
+			CobaltSaber = 36,
+			EmeraldClaymore = 19,
+			ForestRapier = 5,
+		},
+	},
+	{
+		Id = "Zone5Stone",
+		Name = "Pierre d'Épée Polaire",
+		ZoneName = "Zone 5 : Terres Gelées",
+		ZoneOrder = 5,
+		ZoneLength = 370,
+		ForgeTime = 480,
+		CarrySlowFactor = 0.62,
+		MinBaseMoneyPerSec = 22000,
+		MaxBaseMoneyPerSec = 78000,
+		FloorColor = Color3.fromRGB(140, 215, 250),
+		WallColor = Color3.fromRGB(85, 160, 210),
+		StoneColor = Color3.fromRGB(85, 150, 195),
+		CrystalColor = Color3.fromRGB(135, 245, 255),
+		GuardianName = "Seigneur du Givre",
+		GuardianSpeedStat = 28000,
+		GuardianColor = Color3.fromRGB(95, 205, 255),
+		GuardianArmorColor = Color3.fromRGB(40, 95, 160),
+		GuardianScale = 1.65,
+		DropTable = {
+			EmeraldClaymore = 38,
+			ForestRapier = 35,
+			FrostbiteBlade = 21,
+			GlacierCleaver = 6,
+		},
+	},
+	{
+		Id = "Zone6Stone",
+		Name = "Pierre d'Épée Cristalline",
+		ZoneName = "Zone 6 : Canyon d'Améthyste",
+		ZoneOrder = 6,
+		ZoneLength = 450,
+		ForgeTime = 900,
+		CarrySlowFactor = 0.58,
+		MinBaseMoneyPerSec = 180000,
+		MaxBaseMoneyPerSec = 650000,
+		FloorColor = Color3.fromRGB(145, 70, 210),
+		WallColor = Color3.fromRGB(90, 38, 140),
+		StoneColor = Color3.fromRGB(80, 35, 120),
+		CrystalColor = Color3.fromRGB(215, 95, 255),
+		GuardianName = "Archonte de Cristal",
+		GuardianSpeedStat = 160000,
+		GuardianColor = Color3.fromRGB(175, 65, 245),
+		GuardianArmorColor = Color3.fromRGB(75, 25, 115),
+		GuardianScale = 1.75,
+		DropTable = {
+			FrostbiteBlade = 36,
+			GlacierCleaver = 36,
+			AmethystKatana = 21,
+			CrystalReaver = 7,
+		},
+	},
+	{
+		Id = "Zone7Stone",
+		Name = "Pierre d'Épée Volcanique",
+		ZoneName = "Zone 7 : Terres de Lave",
+		ZoneOrder = 7,
+		ZoneLength = 550,
+		ForgeTime = 1500,
+		CarrySlowFactor = 0.55,
+		MinBaseMoneyPerSec = 1500000,
+		MaxBaseMoneyPerSec = 5500000,
+		FloorColor = Color3.fromRGB(190, 58, 32),
+		WallColor = Color3.fromRGB(90, 28, 22),
+		StoneColor = Color3.fromRGB(75, 25, 20),
+		CrystalColor = Color3.fromRGB(255, 115, 30),
+		GuardianName = "Titan Volcanique",
+		GuardianSpeedStat = 950000,
+		GuardianColor = Color3.fromRGB(245, 80, 25),
+		GuardianArmorColor = Color3.fromRGB(50, 20, 20),
+		GuardianScale = 1.88,
+		DropTable = {
+			AmethystKatana = 35,
+			CrystalReaver = 36,
+			MagmaReaper = 21,
+			SolarExcalibur = 8,
+		},
+	},
+	{
+		Id = "Zone8Stone",
+		Name = "Pierre d'Épée de l'Ombre",
+		ZoneName = "Zone 8 : Royaume des Ténèbres",
+		ZoneOrder = 8,
+		ZoneLength = 670,
+		ForgeTime = 2400,
+		CarrySlowFactor = 0.52,
+		MinBaseMoneyPerSec = 14000000,
+		MaxBaseMoneyPerSec = 52000000,
+		FloorColor = Color3.fromRGB(45, 35, 65),
+		WallColor = Color3.fromRGB(25, 20, 40),
+		StoneColor = Color3.fromRGB(30, 22, 48),
+		CrystalColor = Color3.fromRGB(255, 45, 105),
+		GuardianName = "Exécuteur du Néant",
+		GuardianSpeedStat = 6000000,
+		GuardianColor = Color3.fromRGB(210, 30, 85),
+		GuardianArmorColor = Color3.fromRGB(20, 15, 30),
+		GuardianScale = 2.0,
+		DropTable = {
+			MagmaReaper = 34,
+			SolarExcalibur = 37,
+			ShadowScythe = 21,
+			Voidbreaker = 8,
+		},
+	},
+	{
+		Id = "Zone9Stone",
+		Name = "Pierre d'Épée Cosmique",
+		ZoneName = "Zone 9 : Nébuleuse Stellaire",
+		ZoneOrder = 9,
+		ZoneLength = 810,
+		ForgeTime = 3600,
+		CarrySlowFactor = 0.48,
+		MinBaseMoneyPerSec = 130000000,
+		MaxBaseMoneyPerSec = 480000000,
+		FloorColor = Color3.fromRGB(38, 58, 140),
+		WallColor = Color3.fromRGB(20, 30, 85),
+		StoneColor = Color3.fromRGB(30, 45, 110),
+		CrystalColor = Color3.fromRGB(110, 175, 255),
+		GuardianName = "Conquérant Astral",
+		GuardianSpeedStat = 45000000,
+		GuardianColor = Color3.fromRGB(90, 145, 255),
+		GuardianArmorColor = Color3.fromRGB(25, 35, 95),
+		GuardianScale = 2.15,
+		DropTable = {
+			ShadowScythe = 34,
+			Voidbreaker = 37,
+			NebulaStarblade = 21,
+			GalaxySlayer = 8,
+		},
+	},
+	{
+		Id = "Zone10Stone",
+		Name = "Pierre d'Épée Divine",
+		ZoneName = "Zone 10 : Sanctuaire de l'Infini",
+		ZoneOrder = 10,
+		ZoneLength = 980,
+		ForgeTime = 5400,
+		CarrySlowFactor = 0.45,
+		MinBaseMoneyPerSec = 1500000000,
+		MaxBaseMoneyPerSec = 6500000000,
+		FloorColor = Color3.fromRGB(240, 220, 125),
+		WallColor = Color3.fromRGB(210, 170, 60),
+		StoneColor = Color3.fromRGB(240, 230, 195),
+		CrystalColor = Color3.fromRGB(80, 255, 240),
+		GuardianName = "Empereur Céleste",
+		GuardianSpeedStat = 400000000,
+		GuardianColor = Color3.fromRGB(255, 215, 60),
+		GuardianArmorColor = Color3.fromRGB(245, 248, 255),
+		GuardianScale = 2.35,
+		DropTable = {
+			Voidbreaker = 24,
+			NebulaStarblade = 34,
+			GalaxySlayer = 24,
+			CelestialArchblade = 13,
+			OmegaGodsword = 5,
+		},
+	},
+}
+
+function GameConfig.GetTreadmillGainPerTick(treadmillLevel: number): number
+	return math.floor(2 * (1.85 ^ (treadmillLevel - 1)))
+end
+
+GameConfig.Upgrades = {
+	SpeedLevel = {
+		Name = "Niveau du Tapis de Course",
+		Description = "Multiplie par x1.85 la Vitesse gagnée sur ton Tapis",
+		BaseCost = 30,
+		CostMultiplier = 2.1,
+		MaxLevel = 50,
+	},
+	CarryStrength = {
+		Name = "Force de Portage",
+		Description = "Réduit le ralentissement quand tu portes une Pierre",
+		BaseCost = 150,
+		CostMultiplier = 2.0,
+		MaxLevel = 15,
+	},
+	ForgeSpeed = {
+		Name = "Éclosion Rapide",
+		Description = "Les Pierres d'Épée éclosent +25% plus vite par niveau",
+		BaseCost = 300,
+		CostMultiplier = 2.2,
+		MaxLevel = 20,
+	},
+	SlotCount = {
+		Name = "Emplacement de Base (+1)",
+		Description = "Ajoute un emplacement dans ta base (Max 8)",
+		BaseCost = 800,
+		CostMultiplier = 4.5,
+		MaxLevel = 8,
+	},
+}
+
+function GameConfig.GetUpgradeCost(upgradeId: string, currentLevel: number): number
+	local upg = GameConfig.Upgrades[upgradeId]
+	if not upg then
+		return 999999
+	end
+	return math.floor(upg.BaseCost * (upg.CostMultiplier ^ (currentLevel - 1)))
+end
+
+function GameConfig.StatSpeedToWalkSpeed(statSpeed: number): number
+	if statSpeed <= 18 then
+		return 16
+	end
+	local logVal = math.log10(statSpeed / 18 + 1)
+	return math.clamp(16 + logVal * 16, 16, 155)
+end
+
+-- Tire une épée aléatoire ET génère un revenu d'argent $/s aléatoire en fonction de la zone et de la rareté !
+function GameConfig.RollRandomSwordFromStone(stoneId: string, uidCounter: number): OwnedSwordItem
+	for _, tier in ipairs(GameConfig.StoneTiers) do
+		if tier.Id == stoneId then
+			local totalWeight = 0
+			for _, weight in pairs(tier.DropTable) do
+				totalWeight += weight
+			end
+			local roll = math.random() * totalWeight
+			local cumulative = 0
+			local chosenSwordId = "WoodenDagger"
+			for swordId, weight in pairs(tier.DropTable) do
+				cumulative += weight
+				if roll <= cumulative then
+					chosenSwordId = swordId
+					break
+				end
+			end
+
+			local template = GameConfig.Swords[chosenSwordId] or GameConfig.Swords.WoodenDagger
+			local rarityInfo = GameConfig.Rarities[template.Rarity] or GameConfig.Rarities.Common
+
+			-- Jet aléatoire entre MinBaseMoneyPerSec et MaxBaseMoneyPerSec * multiplicateur de rareté
+			local randomFactor = tier.MinBaseMoneyPerSec + math.random() * (tier.MaxBaseMoneyPerSec - tier.MinBaseMoneyPerSec)
+			local finalMoneyPerSec = math.max(5, math.floor(randomFactor * rarityInfo.StatMultiplier))
+			local sellPrice = math.floor(finalMoneyPerSec * 18) -- Valeur de revente chez le Marchand d'Épées
+
+			return {
+				Uid = string.format("sword_%d_%d", uidCounter, math.random(1000, 9999)),
+				SwordId = chosenSwordId,
+				Name = template.Name,
+				Rarity = template.Rarity,
+				ZoneOrder = tier.ZoneOrder,
+				MoneyPerSec = finalMoneyPerSec,
+				SellPrice = sellPrice,
+			}
+		end
+	end
+
+	return {
+		Uid = "sword_default_" .. tostring(uidCounter),
+		SwordId = "WoodenDagger",
+		Name = "Dague d'Entraînement",
+		Rarity = "Common",
+		ZoneOrder = 1,
+		MoneyPerSec = 10,
+		SellPrice = 180,
+	}
+end
+
+return GameConfig
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="4">
+        <Properties>
+          <string name="Name">ModelBuilder</string>
+          <string name="Source"><![CDATA[--!strict
+-- Générateur de modèles 3D :
+-- - Vrais personnages Roblox (Humanoid + Mesh de Tête + Visage + Chapeau/Armure) pour les Marchands et les Gardes
+-- - Décorations thématiques par Zone (Cactus dans le désert, Sapins enneigés, Cristaux, Colonnes, etc.)
+-- - Pierres d'Épée, Épées 3D, Clôtures, Tapis de course personnel
+
+local Players = game:GetService("Players")
+local GameConfig = require(script.Parent.GameConfig)
+
+local ModelBuilder = {}
+
+local function createPart(props: { [string]: any }): Part
+	local p = Instance.new("Part")
+	p.Anchored = if props.Anchored ~= nil then props.Anchored else true
+	p.CanCollide = if props.CanCollide ~= nil then props.CanCollide else false
+	p.Material = props.Material or Enum.Material.SmoothPlastic
+	p.Color = props.Color or Color3.fromRGB(200, 200, 200)
+	p.Size = props.Size or Vector3.new(1, 1, 1)
+	p.CFrame = props.CFrame or CFrame.new()
+	p.TopSurface = props.TopSurface or Enum.SurfaceType.Smooth
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	if props.Shape then
+		p.Shape = props.Shape
+	end
+	if props.Transparency then
+		p.Transparency = props.Transparency
+	end
+	if props.Name then
+		p.Name = props.Name
+	end
+	if props.Parent then
+		p.Parent = props.Parent
+	end
+	return p
+end
+
+local function weldParts(root: BasePart, part: BasePart)
+	local w = Instance.new("WeldConstraint")
+	w.Part0 = root
+	w.Part1 = part
+	w.Parent = root
+end
+
+function ModelBuilder.ApplySurfaceTexture(part: BasePart, textureId: string, faces: { Enum.NormalId }, studsPerTile: number, transparency: number?, color: Color3?)
+	for _, face in ipairs(faces) do
+		local tex = Instance.new("Texture")
+		tex.Texture = textureId
+		tex.Face = face
+		tex.StudsPerTileU = studsPerTile
+		tex.StudsPerTileV = studsPerTile
+		tex.Transparency = transparency or 0.65
+		if color then
+			tex.Color3 = color
+		end
+		tex.Parent = part
+	end
+end
+
+function ModelBuilder.ApplyFloorVisuals(floorPart: BasePart, baseColor: Color3, material: Enum.Material?)
+	floorPart.Color = baseColor
+	floorPart.Material = material or Enum.Material.Plastic
+	floorPart.TopSurface = Enum.SurfaceType.Studs
+	ModelBuilder.ApplySurfaceTexture(
+		floorPart,
+		"rbxassetid://6372755229",
+		{ Enum.NormalId.Top },
+		16,
+		0.78,
+		Color3.new(0, 0, 0)
+	)
+end
+
+-- ============================================================================
+-- 1. DÉCORATIONS THÉMATIQUES PAR ZONE (LÉGÈRES, ESTHÉTIQUES, SUR LES BORDS)
+-- ============================================================================
+function ModelBuilder.CreateZoneDecorations(parent: Instance, zoneOrder: number, zoneCenter: Vector3, zLength: number, corridorWidth: number)
+	local decoFolder = Instance.new("Folder")
+	decoFolder.Name = "ZoneDecor_" .. zoneOrder
+	decoFolder.Parent = parent
+
+	-- 4 emplacements de décor sur les côtés de la zone (pour ne jamais gêner la course au milieu)
+	local sideX = (corridorWidth / 2) - 10
+	local zOff = zLength * 0.27
+	local spots = {
+		zoneCenter + Vector3.new(-sideX, 0, zOff),
+		zoneCenter + Vector3.new(sideX, 0, zOff),
+		zoneCenter + Vector3.new(-sideX, 0, -zOff),
+		zoneCenter + Vector3.new(sideX, 0, -zOff),
+	}
+
+	for i, pos in ipairs(spots) do
+		if zoneOrder == 1 then
+			-- Zone 1 (Prairie) : Arbres ronds et buissons fleuris
+			createPart({
+				Size = Vector3.new(2.2, 8, 2.2),
+				CFrame = CFrame.new(pos + Vector3.new(0, 4, 0)),
+				Color = Color3.fromRGB(125, 85, 50),
+				Material = Enum.Material.Wood,
+				Parent = decoFolder,
+			})
+			createPart({
+				Shape = Enum.PartType.Ball,
+				Size = Vector3.new(9, 9, 9),
+				CFrame = CFrame.new(pos + Vector3.new(0, 9.5, 0)),
+				Color = Color3.fromRGB(65, 195, 55),
+				Material = Enum.Material.Grass,
+				Parent = decoFolder,
+			})
+
+		elseif zoneOrder == 2 then
+			-- Zone 2 (Vallée Rocheuse) : Rochers anciens et piliers de pierre
+			createPart({
+				Size = Vector3.new(6, 5, 5),
+				CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0)) * CFrame.Angles(0, math.rad(i * 40), math.rad(8)),
+				Color = Color3.fromRGB(115, 120, 130),
+				Material = Enum.Material.Rock,
+				Parent = decoFolder,
+			})
+			createPart({
+				Size = Vector3.new(3.5, 8, 3.5),
+				CFrame = CFrame.new(pos + Vector3.new(2, 4, 1.5)) * CFrame.Angles(math.rad(-10), 0, 0),
+				Color = Color3.fromRGB(95, 100, 110),
+				Material = Enum.Material.Slate,
+				Parent = decoFolder,
+			})
+
+		elseif zoneOrder == 3 then
+			-- Zone 3 (Désert Doré) : Vrais Cactus à bras !
+			local trunk = createPart({
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(10, 2.4, 2.4),
+				CFrame = CFrame.new(pos + Vector3.new(0, 5, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+				Color = Color3.fromRGB(55, 165, 65),
+				Material = Enum.Material.SmoothPlastic,
+				Parent = decoFolder,
+			})
+			createPart({
+				Shape = Enum.PartType.Ball,
+				Size = Vector3.new(2.4, 2.4, 2.4),
+				CFrame = CFrame.new(pos + Vector3.new(0, 10, 0)),
+				Color = Color3.fromRGB(55, 165, 65),
+				Parent = decoFolder,
+			})
+			-- Bras gauche et droit du cactus
+			for _, side in ipairs({ -1, 1 }) do
+				local armY = if side == -1 then 5.2 else 6.4
+				createPart({
+					Size = Vector3.new(2.2, 1.5, 1.5),
+					CFrame = CFrame.new(pos + Vector3.new(side * 1.6, armY, 0)),
+					Color = Color3.fromRGB(55, 165, 65),
+					Parent = decoFolder,
+				})
+				createPart({
+					Size = Vector3.new(1.5, 3.2, 1.5),
+					CFrame = CFrame.new(pos + Vector3.new(side * 2.4, armY + 1.4, 0)),
+					Color = Color3.fromRGB(55, 165, 65),
+					Parent = decoFolder,
+				})
+			end
+			local _ = trunk
+
+		elseif zoneOrder == 4 then
+			-- Zone 4 (Jungle d'Émeraude) : Palmiers tropicaux et cristaux d'émeraude
+			createPart({
+				Size = Vector3.new(2.0, 12, 2.0),
+				CFrame = CFrame.new(pos + Vector3.new(0, 6, 0)) * CFrame.Angles(0, 0, math.rad(i % 2 == 0 and 6 or -6)),
+				Color = Color3.fromRGB(115, 75, 40),
+				Material = Enum.Material.Wood,
+				Parent = decoFolder,
+			})
+			for a = 1, 4 do
+				local ang = math.rad(a * 90)
+				createPart({
+					Size = Vector3.new(1.8, 0.5, 6.5),
+					CFrame = CFrame.new(pos + Vector3.new(math.cos(ang) * 2.8, 11.8, math.sin(ang) * 2.8))
+						* CFrame.Angles(math.rad(-20), ang, 0),
+					Color = Color3.fromRGB(40, 205, 85),
+					Material = Enum.Material.Grass,
+					Parent = decoFolder,
+				})
+			end
+
+		elseif zoneOrder == 5 then
+			-- Zone 5 (Terres Gelées) : Sapins enneigés et pics de glace
+			createPart({
+				Size = Vector3.new(2, 5, 2),
+				CFrame = CFrame.new(pos + Vector3.new(0, 2.5, 0)),
+				Color = Color3.fromRGB(95, 65, 45),
+				Material = Enum.Material.Wood,
+				Parent = decoFolder,
+			})
+			createPart({
+				Size = Vector3.new(7, 5, 7),
+				CFrame = CFrame.new(pos + Vector3.new(0, 6.5, 0)),
+				Color = Color3.fromRGB(220, 245, 255),
+				Material = Enum.Material.Snow,
+				Parent = decoFolder,
+			})
+			createPart({
+				Size = Vector3.new(4.5, 4.5, 4.5),
+				CFrame = CFrame.new(pos + Vector3.new(0, 10.5, 0)),
+				Color = Color3.fromRGB(240, 250, 255),
+				Material = Enum.Material.Ice,
+				Parent = decoFolder,
+			})
+
+		elseif zoneOrder == 6 then
+			-- Zone 6 (Canyon d'Améthyste) : Grappes de Cristaux géants
+			for c = 1, 3 do
+				createPart({
+					Size = Vector3.new(1.8, 7 + c * 2, 1.8),
+					CFrame = CFrame.new(pos + Vector3.new((c - 2) * 1.6, 3.5 + c, 0))
+						* CFrame.Angles(math.rad((c - 2) * 15), math.rad(c * 30), math.rad((c - 2) * 12)),
+					Color = Color3.fromRGB(205, 85, 255),
+					Material = Enum.Material.Neon,
+					Parent = decoFolder,
+				})
+			end
+
+		elseif zoneOrder == 7 then
+			-- Zone 7 (Terres de Lave) : Piliers de basalte et bassins de magma
+			createPart({
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(0.8, 7, 7),
+				CFrame = CFrame.new(pos + Vector3.new(0, 0.4, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+				Color = Color3.fromRGB(255, 95, 20),
+				Material = Enum.Material.Neon,
+				Parent = decoFolder,
+			})
+			createPart({
+				Size = Vector3.new(3.5, 9, 3.5),
+				CFrame = CFrame.new(pos + Vector3.new(0, 4.5, 0)),
+				Color = Color3.fromRGB(50, 25, 25),
+				Material = Enum.Material.Basalt,
+				Parent = decoFolder,
+			})
+
+		elseif zoneOrder == 8 then
+			-- Zone 8 (Royaume des Ténèbres) : Obélisques noirs runiques
+			createPart({
+				Size = Vector3.new(3.2, 14, 3.2),
+				CFrame = CFrame.new(pos + Vector3.new(0, 7, 0)),
+				Color = Color3.fromRGB(25, 18, 38),
+				Material = Enum.Material.Slate,
+				Parent = decoFolder,
+			})
+			createPart({
+				Shape = Enum.PartType.Ball,
+				Size = Vector3.new(2.8, 2.8, 2.8),
+				CFrame = CFrame.new(pos + Vector3.new(0, 15.8, 0)),
+				Color = Color3.fromRGB(255, 35, 95),
+				Material = Enum.Material.Neon,
+				Parent = decoFolder,
+			})
+
+		elseif zoneOrder == 9 then
+			-- Zone 9 (Nébuleuse Stellaire) : Planètes flottantes à anneaux
+			local planet = createPart({
+				Shape = Enum.PartType.Ball,
+				Size = Vector3.new(5.5, 5.5, 5.5),
+				CFrame = CFrame.new(pos + Vector3.new(0, 9, 0)),
+				Color = Color3.fromRGB(85, 130, 255),
+				Material = Enum.Material.Neon,
+				Parent = decoFolder,
+			})
+			createPart({
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(0.3, 10, 10),
+				CFrame = planet.CFrame * CFrame.Angles(math.rad(25), 0, math.rad(70)),
+				Color = Color3.fromRGB(185, 220, 255),
+				Material = Enum.Material.Neon,
+				Transparency = 0.2,
+				Parent = decoFolder,
+			})
+
+		elseif zoneOrder == 10 then
+			-- Zone 10 (Sanctuaire Divin) : Colonnes dorées antiques
+			createPart({
+				Size = Vector3.new(4.2, 1.5, 4.2),
+				CFrame = CFrame.new(pos + Vector3.new(0, 0.75, 0)),
+				Color = Color3.fromRGB(245, 240, 225),
+				Material = Enum.Material.Marble,
+				Parent = decoFolder,
+			})
+			createPart({
+				Shape = Enum.PartType.Cylinder,
+				Size = Vector3.new(13, 3.0, 3.0),
+				CFrame = CFrame.new(pos + Vector3.new(0, 7.5, 0)) * CFrame.Angles(0, 0, math.rad(90)),
+				Color = Color3.fromRGB(250, 248, 235),
+				Material = Enum.Material.Marble,
+				Parent = decoFolder,
+			})
+			createPart({
+				Size = Vector3.new(4.4, 1.6, 4.4),
+				CFrame = CFrame.new(pos + Vector3.new(0, 14.5, 0)),
+				Color = Color3.fromRGB(255, 215, 65),
+				Material = Enum.Material.Metal,
+				Parent = decoFolder,
+			})
+		end
+	end
+end
+
+-- ============================================================================
+-- 2. VRAI PERSONNAGE ROBLOX (HUMANOID + MESH TÊTE + VISAGE + VÊTEMENTS/CHAPEAU)
+-- ============================================================================
+function ModelBuilder.CreateRobloxCharacterNPC(
+	name: string,
+	rootCF: CFrame,
+	scale: number,
+	skinColor: Color3,
+	torsoColor: Color3,
+	legsColor: Color3,
+	hatType: "Merchant" | "Wizard" | "Knight",
+	accentColor: Color3
+): Model
+	local s = scale
+	local npc = Instance.new("Model")
+	npc.Name = name
+
+	local hum = Instance.new("Humanoid")
+	hum.DisplayDistanceType = Enum.HumanoidDisplayDistanceType.None
+	hum.Parent = npc
+
+	-- Torse Roblox avec biseaux doux
+	local torso = createPart({
+		Name = "HumanoidRootPart",
+		Size = Vector3.new(2.0 * s, 2.0 * s, 1.0 * s),
+		Color = torsoColor,
+		Material = Enum.Material.SmoothPlastic,
+		CFrame = rootCF,
+		Anchored = true,
+		CanCollide = true,
+		Parent = npc,
+	})
+	npc.PrimaryPart = torso
+
+	-- Col / Foulard / Plastron décoratif
+	createPart({
+		Name = "Collar",
+		Size = Vector3.new(2.1 * s, 0.45 * s, 1.1 * s),
+		Color = accentColor,
+		Material = Enum.Material.Fabric,
+		CFrame = rootCF * CFrame.new(0, 0.8 * s, 0),
+		Parent = npc,
+	})
+
+	-- Ceinture avec boucle dorée
+	createPart({
+		Name = "Belt",
+		Size = Vector3.new(2.05 * s, 0.32 * s, 1.05 * s),
+		Color = Color3.fromRGB(45, 35, 25),
+		Material = Enum.Material.Fabric,
+		CFrame = rootCF * CFrame.new(0, -0.85 * s, 0),
+		Parent = npc,
+	})
+	createPart({
+		Name = "BeltBuckle",
+		Size = Vector3.new(0.45 * s, 0.38 * s, 0.15 * s),
+		Color = Color3.fromRGB(255, 210, 55),
+		Material = Enum.Material.Neon,
+		CFrame = rootCF * CFrame.new(0, -0.85 * s, -0.52 * s),
+		Parent = npc,
+	})
+
+	-- Tête cylindrique authentique Roblox + Visage souriant !
+	local head = createPart({
+		Name = "Head",
+		Size = Vector3.new(2.0 * s, 1.0 * s, 1.0 * s),
+		Color = skinColor,
+		Material = Enum.Material.SmoothPlastic,
+		CFrame = rootCF * CFrame.new(0, 1.5 * s, 0),
+		Parent = npc,
+	})
+	local headMesh = Instance.new("SpecialMesh")
+	headMesh.MeshType = Enum.MeshType.Head
+	headMesh.Scale = Vector3.new(1.25, 1.25, 1.25)
+	headMesh.Parent = head
+
+	local face = Instance.new("Decal")
+	face.Name = "face"
+	face.Face = Enum.NormalId.Front
+	face.Texture = "rbxasset://textures/face.png"
+	face.Parent = head
+
+	-- Bras et Jambes avec biseaux Roblox
+	local leftArm = createPart({
+		Name = "LeftArm",
+		Size = Vector3.new(1.0 * s, 2.0 * s, 1.0 * s),
+		Color = torsoColor,
+		Material = Enum.Material.SmoothPlastic,
+		CFrame = rootCF * CFrame.new(-1.5 * s, 0, 0),
+		Parent = npc,
+	})
+	-- Main gauche couleur peau
+	createPart({
+		Name = "LeftHand",
+		Size = Vector3.new(0.95 * s, 0.45 * s, 0.95 * s),
+		Color = skinColor,
+		CFrame = leftArm.CFrame * CFrame.new(0, -0.8 * s, 0),
+		Parent = npc,
+	})
+
+	local rightArm = createPart({
+		Name = "RightArm",
+		Size = Vector3.new(1.0 * s, 2.0 * s, 1.0 * s),
+		Color = torsoColor,
+		Material = Enum.Material.SmoothPlastic,
+		CFrame = rootCF * CFrame.new(1.5 * s, 0, 0),
+		Parent = npc,
+	})
+	createPart({
+		Name = "RightHand",
+		Size = Vector3.new(0.95 * s, 0.45 * s, 0.95 * s),
+		Color = skinColor,
+		CFrame = rightArm.CFrame * CFrame.new(0, -0.8 * s, 0),
+		Parent = npc,
+	})
+
+	createPart({
+		Name = "LeftLeg",
+		Size = Vector3.new(1.0 * s, 2.0 * s, 1.0 * s),
+		Color = legsColor,
+		Material = Enum.Material.SmoothPlastic,
+		CFrame = rootCF * CFrame.new(-0.5 * s, -2.0 * s, 0),
+		Parent = npc,
+	})
+
+	createPart({
+		Name = "RightLeg",
+		Size = Vector3.new(1.0 * s, 2.0 * s, 1.0 * s),
+		Color = legsColor,
+		Material = Enum.Material.SmoothPlastic,
+		CFrame = rootCF * CFrame.new(0.5 * s, -2.0 * s, 0),
+		Parent = npc,
+	})
+
+	-- Chapeau / Coiffe selon le rôle du PNJ
+	if hatType == "Merchant" then
+		-- Haut-de-forme / Chapeau de riche Marchand doré avec ruban
+		createPart({
+			Name = "HatBrim",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(0.2 * s, 2.2 * s, 2.2 * s),
+			CFrame = head.CFrame * CFrame.new(0, 0.55 * s, 0) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = Color3.fromRGB(30, 32, 40),
+			Parent = npc,
+		})
+		createPart({
+			Name = "HatTop",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(1.2 * s, 1.45 * s, 1.45 * s),
+			CFrame = head.CFrame * CFrame.new(0, 1.15 * s, 0) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = Color3.fromRGB(30, 32, 40),
+			Parent = npc,
+		})
+		createPart({
+			Name = "HatBand",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(0.3 * s, 1.5 * s, 1.5 * s),
+			CFrame = head.CFrame * CFrame.new(0, 0.78 * s, 0) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = accentColor,
+			Material = Enum.Material.Neon,
+			Parent = npc,
+		})
+	elseif hatType == "Wizard" then
+		-- Chapeau mystique de Maître des Sentiers / Traînées
+		createPart({
+			Name = "HatBrim",
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(0.18 * s, 2.5 * s, 2.5 * s),
+			CFrame = head.CFrame * CFrame.new(0, 0.55 * s, 0) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = Color3.fromRGB(35, 65, 145),
+			Parent = npc,
+		})
+		createPart({
+			Name = "WizardCone",
+			Size = Vector3.new(1.3 * s, 1.8 * s, 1.3 * s),
+			CFrame = head.CFrame * CFrame.new(0, 1.35 * s, 0) * CFrame.Angles(math.rad(-10), math.rad(45), 0),
+			Color = accentColor,
+			Material = Enum.Material.Neon,
+			Parent = npc,
+		})
+	end
+
+	return npc
+end
+
+-- ============================================================================
+-- 3. GARDES DE ZONE AMÉLIORÉS (VRAI STYLE CHEVALIER ROBLOX EN ARMURE ROYALE)
+-- ============================================================================
+function ModelBuilder.CreateGuardianModel(stoneTier: GameConfig.StoneTier, spawnPos: Vector3): Model
+	local s = stoneTier.GuardianScale * 1.35
+	local rootCF = CFrame.new(spawnPos + Vector3.new(0, 3.0 * s, 0))
+
+	local model = ModelBuilder.CreateRobloxCharacterNPC(
+		stoneTier.GuardianName,
+		rootCF,
+		s,
+		Color3.fromRGB(235, 200, 165),
+		stoneTier.GuardianArmorColor,
+		stoneTier.GuardianColor,
+		"Knight",
+		stoneTier.CrystalColor
+	)
+
+	local head = model:FindFirstChild("Head") :: BasePart
+	local rightArm = model:FindFirstChild("RightArm") :: BasePart
+
+	-- Casque de Chevalier Royal avec Visière lumineuse et Cornes
+	createPart({
+		Name = "HelmetTop",
+		Size = Vector3.new(1.35 * s, 0.45 * s, 1.35 * s),
+		Color = stoneTier.GuardianArmorColor,
+		Material = Enum.Material.Metal,
+		CFrame = head.CFrame * CFrame.new(0, 0.52 * s, 0),
+		Parent = model,
+	})
+	createPart({
+		Name = "VisorGlow",
+		Size = Vector3.new(1.1 * s, 0.24 * s, 0.2 * s),
+		Color = stoneTier.CrystalColor,
+		Material = Enum.Material.Neon,
+		CFrame = head.CFrame * CFrame.new(0, 0.12 * s, -0.58 * s),
+		Parent = model,
+	})
+	for _, side in ipairs({ -1, 1 }) do
+		createPart({
+			Name = "HelmetHorn",
+			Size = Vector3.new(0.28 * s, 1.3 * s, 0.28 * s),
+			Color = stoneTier.CrystalColor,
+			Material = Enum.Material.Neon,
+			CFrame = head.CFrame * CFrame.new(side * 0.72 * s, 0.65 * s, 0) * CFrame.Angles(math.rad(-12), 0, math.rad(-side * 26)),
+			Parent = model,
+		})
+		createPart({
+			Name = "Pauldron",
+			Size = Vector3.new(1.25 * s, 0.9 * s, 1.3 * s),
+			Color = stoneTier.GuardianColor,
+			Material = Enum.Material.Metal,
+			CFrame = rootCF * CFrame.new(side * 1.55 * s, 0.85 * s, 0) * CFrame.Angles(0, 0, math.rad(-side * 12)),
+			Parent = model,
+		})
+	end
+
+	-- Cape royale dans le dos
+	createPart({
+		Name = "Cape",
+		Size = Vector3.new(2.1 * s, 3.3 * s, 0.18 * s),
+		Color = stoneTier.CrystalColor,
+		Material = Enum.Material.Fabric,
+		CFrame = rootCF * CFrame.new(0, -0.45 * s, 0.65 * s) * CFrame.Angles(math.rad(10), 0, 0),
+		Parent = model,
+	})
+
+	-- Épée Runique dans la main droite du Garde
+	createPart({
+		Name = "GuardBlade",
+		Size = Vector3.new(0.28 * s, 4.8 * s, 0.95 * s),
+		Color = stoneTier.CrystalColor,
+		Material = Enum.Material.Neon,
+		CFrame = rightArm.CFrame * CFrame.new(0, -0.8 * s, -1.8 * s) * CFrame.Angles(math.rad(-75), 0, 0),
+		Parent = model,
+	})
+
+	local bg = Instance.new("BillboardGui")
+	bg.Name = "GuardianTag"
+	bg.Size = UDim2.fromOffset(260, 66)
+	bg.StudsOffset = Vector3.new(0, 2.8 * s, 0)
+	bg.AlwaysOnTop = true
+	bg.MaxDistance = 260
+	bg.Parent = head
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.Size = UDim2.fromScale(1, 0.55)
+	title.BackgroundTransparency = 1
+	title.Text = string.format("⚔️ %s (Vit: %s)", stoneTier.GuardianName, GameConfig.FormatNumber(stoneTier.GuardianSpeedStat))
+	title.TextColor3 = stoneTier.CrystalColor
+	title.TextStrokeTransparency = 0
+	title.Font = Enum.Font.FredokaOne
+	title.TextScaled = true
+	title.Parent = bg
+
+	local status = Instance.new("TextLabel")
+	status.Name = "Status"
+	status.Position = UDim2.fromScale(0, 0.55)
+	status.Size = UDim2.fromScale(1, 0.45)
+	status.BackgroundTransparency = 1
+	status.Text = "💤 AFK (Immobile)"
+	status.TextColor3 = Color3.fromRGB(200, 225, 255)
+	status.TextStrokeTransparency = 0
+	status.Font = Enum.Font.GothamBold
+	status.TextScaled = true
+	status.Parent = bg
+
+	return model
+end
+
+function ModelBuilder.PositionAndAnimateGuardian(model: Model, baseScale: number, rootCF: CFrame, animTime: number, isMoving: boolean)
+	local s = baseScale * 1.35
+	local swingAmp = if isMoving then math.rad(42) else 0
+	local swing = if isMoving then math.sin(animTime * 10) * swingAmp else 0
+
+	local torso = model:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if torso then
+		torso.CFrame = rootCF
+	end
+	local collar = model:FindFirstChild("Collar") :: BasePart?
+	if collar then
+		collar.CFrame = rootCF * CFrame.new(0, 0.8 * s, 0)
+	end
+	local belt = model:FindFirstChild("Belt") :: BasePart?
+	if belt then
+		belt.CFrame = rootCF * CFrame.new(0, -0.85 * s, 0)
+	end
+	local buckle = model:FindFirstChild("BeltBuckle") :: BasePart?
+	if buckle then
+		buckle.CFrame = rootCF * CFrame.new(0, -0.85 * s, -0.52 * s)
+	end
+	local cape = model:FindFirstChild("Cape") :: BasePart?
+	if cape then
+		local capeWave = math.rad(12) + math.abs(swing) * 0.4
+		cape.CFrame = rootCF * CFrame.new(0, -0.45 * s, 0.65 * s) * CFrame.Angles(capeWave, 0, 0)
+	end
+	local head = model:FindFirstChild("Head") :: BasePart?
+	if head then
+		head.CFrame = rootCF * CFrame.new(0, 1.5 * s, 0)
+		local hTop = model:FindFirstChild("HelmetTop") :: BasePart?
+		if hTop then
+			hTop.CFrame = head.CFrame * CFrame.new(0, 0.52 * s, 0)
+		end
+		local visor = model:FindFirstChild("VisorGlow") :: BasePart?
+		if visor then
+			visor.CFrame = head.CFrame * CFrame.new(0, 0.12 * s, -0.58 * s)
+		end
+	end
+
+	local leftArm = model:FindFirstChild("LeftArm") :: BasePart?
+	if leftArm then
+		leftArm.CFrame = rootCF * CFrame.new(-1.5 * s, 0.7 * s, 0) * CFrame.Angles(swing, 0, 0) * CFrame.new(0, -0.7 * s, 0)
+		local lHand = model:FindFirstChild("LeftHand") :: BasePart?
+		if lHand then
+			lHand.CFrame = leftArm.CFrame * CFrame.new(0, -0.8 * s, 0)
+		end
+	end
+
+	local rightArm = model:FindFirstChild("RightArm") :: BasePart?
+	if rightArm then
+		local rAngle = if isMoving then math.rad(35) - swing * 0.7 else 0
+		rightArm.CFrame = rootCF * CFrame.new(1.5 * s, 0.7 * s, 0) * CFrame.Angles(rAngle, 0, 0) * CFrame.new(0, -0.7 * s, 0)
+		local rHand = model:FindFirstChild("RightHand") :: BasePart?
+		if rHand then
+			rHand.CFrame = rightArm.CFrame * CFrame.new(0, -0.8 * s, 0)
+		end
+		local blade = model:FindFirstChild("GuardBlade") :: BasePart?
+		if blade then
+			blade.CFrame = rightArm.CFrame * CFrame.new(0, -0.8 * s, -1.8 * s) * CFrame.Angles(math.rad(-75), 0, 0)
+		end
+	end
+
+	local leftLeg = model:FindFirstChild("LeftLeg") :: BasePart?
+	if leftLeg then
+		leftLeg.CFrame = rootCF * CFrame.new(-0.5 * s, -1.0 * s, 0) * CFrame.Angles(-swing, 0, 0) * CFrame.new(0, -1.0 * s, 0)
+	end
+	local rightLeg = model:FindFirstChild("RightLeg") :: BasePart?
+	if rightLeg then
+		rightLeg.CFrame = rootCF * CFrame.new(0.5 * s, -1.0 * s, 0) * CFrame.Angles(swing, 0, 0) * CFrame.new(0, -1.0 * s, 0)
+	end
+
+	local hornIdx = 0
+	local pauldronIdx = 0
+	for _, child in ipairs(model:GetChildren()) do
+		if child:IsA("BasePart") then
+			if child.Name == "HelmetHorn" and head then
+				hornIdx += 1
+				local side = if hornIdx == 1 then -1 else 1
+				child.CFrame = head.CFrame * CFrame.new(side * 0.72 * s, 0.65 * s, 0) * CFrame.Angles(math.rad(-12), 0, math.rad(-side * 26))
+			elseif child.Name == "Pauldron" then
+				pauldronIdx += 1
+				local side = if pauldronIdx == 1 then -1 else 1
+				child.CFrame = rootCF * CFrame.new(side * 1.55 * s, 0.85 * s, 0) * CFrame.Angles(0, 0, math.rad(-side * 12))
+			end
+		end
+	end
+end
+
+-- ============================================================================
+-- 4. BOUTIQUES & VENDEURS AUTHENTIQUES ROBLOX
+-- ============================================================================
+function ModelBuilder.CreateMerchantStall(
+	parent: Instance,
+	centerCF: CFrame,
+	titleText: string,
+	subtitleText: string,
+	themeColor: Color3,
+	actionText: string,
+	merchantType: "Merchant" | "Wizard"
+): ProximityPrompt
+	local stall = Instance.new("Model")
+	stall.Name = titleText
+	stall.Parent = parent
+
+	-- Tapis d'accueil devant le stand
+	createPart({
+		Name = "WelcomeRug",
+		Size = Vector3.new(10, 0.2, 6),
+		CFrame = centerCF * CFrame.new(0, 0.1, -3.5),
+		Color = themeColor,
+		Material = Enum.Material.Fabric,
+		Parent = stall,
+	})
+
+	-- Comptoir détaillé avec bordure dorée
+	local counter = createPart({
+		Name = "Counter",
+		Size = Vector3.new(13, 3.4, 4.2),
+		CFrame = centerCF * CFrame.new(0, 1.7, 0),
+		Color = Color3.fromRGB(115, 72, 40),
+		Material = Enum.Material.WoodPlanks,
+		CanCollide = true,
+		Parent = stall,
+	})
+	createPart({
+		Name = "CounterTop",
+		Size = Vector3.new(13.6, 0.5, 4.8),
+		CFrame = centerCF * CFrame.new(0, 3.55, 0),
+		Color = Color3.fromRGB(235, 225, 205),
+		Material = Enum.Material.Marble,
+		Parent = stall,
+	})
+
+	-- Coffre d'or ou Cristaux exposés sur le comptoir
+	if merchantType == "Merchant" then
+		createPart({
+			Size = Vector3.new(2.6, 1.6, 1.8),
+			CFrame = centerCF * CFrame.new(-3.8, 4.5, 0) * CFrame.Angles(0, math.rad(15), 0),
+			Color = Color3.fromRGB(255, 205, 45),
+			Material = Enum.Material.Metal,
+			Parent = stall,
+		})
+	else
+		createPart({
+			Shape = Enum.PartType.Ball,
+			Size = Vector3.new(2.2, 2.2, 2.2),
+			CFrame = centerCF * CFrame.new(3.8, 4.8, 0),
+			Color = Color3.fromRGB(80, 235, 255),
+			Material = Enum.Material.Neon,
+			Parent = stall,
+		})
+	end
+
+	-- 4 Piliers en bois sculpté
+	for _, sideX in ipairs({ -5.8, 5.8 }) do
+		for _, sideZ in ipairs({ -1.6, 2.2 }) do
+			createPart({
+				Size = Vector3.new(0.85, 10.5, 0.85),
+				CFrame = centerCF * CFrame.new(sideX, 5.25, sideZ),
+				Color = Color3.fromRGB(85, 52, 28),
+				Material = Enum.Material.Wood,
+				Parent = stall,
+			})
+		end
+	end
+
+	-- Auvent rayé (Blanc & Couleur du thème, exactement comme sur l'image 2 !)
+	local stripeCount = 7
+	local stripeW = 14.0 / stripeCount
+	for i = 1, stripeCount do
+		local xOff = -7.0 + (i - 0.5) * stripeW
+		createPart({
+			Name = "AwningStripe_" .. i,
+			Size = Vector3.new(stripeW, 1.2, 7.2),
+			CFrame = centerCF * CFrame.new(xOff, 10.8, 0.2) * CFrame.Angles(math.rad(10), 0, 0),
+			Color = if i % 2 == 1 then themeColor else Color3.fromRGB(250, 250, 252),
+			Material = Enum.Material.SmoothPlastic,
+			Parent = stall,
+		})
+	end
+
+	-- Vrai Personnage Marchand Roblox derrière le comptoir (regardant vers le joueur, Z négatif)
+	local npcCF = centerCF * CFrame.new(0, 3.1, 3.2)
+	local npc = ModelBuilder.CreateRobloxCharacterNPC(
+		"Vendeur_" .. titleText,
+		npcCF,
+		1.25,
+		Color3.fromRGB(255, 215, 175),
+		if merchantType == "Merchant" then Color3.fromRGB(185, 45, 45) else Color3.fromRGB(45, 95, 200),
+		Color3.fromRGB(40, 45, 60),
+		merchantType,
+		themeColor
+	)
+	npc.Parent = stall
+
+	-- Panneau lumineux au-dessus de l'auvent
+	local bg = Instance.new("BillboardGui")
+	bg.Size = UDim2.fromOffset(310, 74)
+	bg.StudsOffset = Vector3.new(0, 14.8, 0)
+	bg.AlwaysOnTop = true
+	bg.MaxDistance = 190
+	bg.Parent = counter
+
+	local tLbl = Instance.new("TextLabel")
+	tLbl.Size = UDim2.new(1, 0, 0.6, 0)
+	tLbl.BackgroundTransparency = 1
+	tLbl.Font = Enum.Font.FredokaOne
+	tLbl.TextColor3 = themeColor
+	tLbl.TextStrokeTransparency = 0
+	tLbl.TextScaled = true
+	tLbl.Text = titleText
+	tLbl.Parent = bg
+
+	local sLbl = Instance.new("TextLabel")
+	sLbl.Size = UDim2.new(1, 0, 0.4, 0)
+	sLbl.Position = UDim2.fromScale(0, 0.6)
+	sLbl.BackgroundTransparency = 1
+	sLbl.Font = Enum.Font.GothamBold
+	sLbl.TextColor3 = Color3.new(1, 1, 1)
+	sLbl.TextStrokeTransparency = 0
+	sLbl.TextScaled = true
+	sLbl.Text = subtitleText
+	sLbl.Parent = bg
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.ObjectText = titleText
+	prompt.ActionText = actionText
+	prompt.HoldDuration = 0
+	prompt.MaxActivationDistance = 15
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = counter
+
+	local _ = Players
+	return prompt
+end
+
+-- ============================================================================
+-- 5. PIERRES D'ÉPÉE, ÉPÉES 3D, CLÔTURES & TAPIS DE COURSE
+-- ============================================================================
+function ModelBuilder.CreateSwordStoneModel(stoneTier: GameConfig.StoneTier, cframe: CFrame, isCarried: boolean?): Model
+	local model = Instance.new("Model")
+	model.Name = stoneTier.Name
+
+	local anchored = not isCarried
+
+	local core = createPart({
+		Name = "PrimaryPart",
+		Size = Vector3.new(4.4, 5.4, 4.4),
+		Color = stoneTier.StoneColor,
+		Material = Enum.Material.Rock,
+		CFrame = cframe * CFrame.new(0, 2.2, 0),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+	model.PrimaryPart = core
+
+	local mesh = Instance.new("SpecialMesh")
+	mesh.MeshType = Enum.MeshType.Sphere
+	mesh.Scale = Vector3.new(1, 1.25, 1)
+	mesh.Parent = core
+
+	local ring = createPart({
+		Name = "AuraRing",
+		Shape = Enum.PartType.Cylinder,
+		Size = Vector3.new(0.35, 6.2, 6.2),
+		Color = stoneTier.CrystalColor,
+		Material = Enum.Material.Neon,
+		Transparency = 0.25,
+		CFrame = core.CFrame * CFrame.Angles(0, 0, math.rad(90)),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+	if not anchored then
+		weldParts(core, ring)
+	end
+
+	local shardAngles = { 0, 45, 90, 135, 180, 225, 270, 315 }
+	for i, deg in ipairs(shardAngles) do
+		local rad = math.rad(deg)
+		local offset = CFrame.new(math.cos(rad) * 1.8, (i % 2 == 0 and 0.4 or -0.5), math.sin(rad) * 1.8)
+			* CFrame.Angles(math.rad(22), rad, math.rad(18))
+		local shard = createPart({
+			Name = "CrystalShard_" .. i,
+			Size = Vector3.new(0.85, 3.0, 0.85),
+			Color = stoneTier.CrystalColor,
+			Material = Enum.Material.Neon,
+			CFrame = core.CFrame * offset,
+			Anchored = anchored,
+			CanCollide = false,
+			Parent = model,
+		})
+		if not anchored then
+			weldParts(core, shard)
+		end
+	end
+
+	local blade = createPart({
+		Name = "SealedBlade",
+		Size = Vector3.new(0.38, 4.4, 1.15),
+		Color = stoneTier.CrystalColor,
+		Material = Enum.Material.Neon,
+		CFrame = core.CFrame * CFrame.new(0, 2.8, 0),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+	local guard = createPart({
+		Name = "CrossGuard",
+		Size = Vector3.new(0.65, 0.45, 2.7),
+		Color = Color3.fromRGB(35, 38, 50),
+		Material = Enum.Material.Metal,
+		CFrame = blade.CFrame * CFrame.new(0, 1.3, 0),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+	local grip = createPart({
+		Name = "Grip",
+		Size = Vector3.new(0.42, 1.4, 0.45),
+		Color = Color3.fromRGB(95, 60, 35),
+		Material = Enum.Material.Wood,
+		CFrame = blade.CFrame * CFrame.new(0, 2.1, 0),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+
+	if not anchored then
+		weldParts(core, blade)
+		weldParts(core, guard)
+		weldParts(core, grip)
+	end
+
+	local particles = Instance.new("ParticleEmitter")
+	particles.Color = ColorSequence.new(stoneTier.CrystalColor, Color3.new(1, 1, 1))
+	particles.Size = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.7),
+		NumberSequenceKeypoint.new(1, 0),
+	})
+	particles.Lifetime = NumberRange.new(0.5, 1.2)
+	particles.Rate = 16
+	particles.Speed = NumberRange.new(2, 5)
+	particles.LightEmission = 1
+	particles.Parent = core
+
+	local light = Instance.new("PointLight")
+	light.Color = stoneTier.CrystalColor
+	light.Range = 15
+	light.Brightness = 2.4
+	light.Parent = core
+
+	return model
+end
+
+function ModelBuilder.CreateSwordModel(swordId: string, cframe: CFrame, anchored: boolean): Model
+	local info = GameConfig.Swords[swordId] or GameConfig.Swords.WoodenDagger
+	local rarity = GameConfig.Rarities[info.Rarity] or GameConfig.Rarities.Common
+	local scale = info.Scale or 1.0
+
+	local model = Instance.new("Model")
+	model.Name = info.Name
+
+	local handle = createPart({
+		Name = "Handle",
+		Size = Vector3.new(0.34 * scale, 1.35 * scale, 0.38 * scale),
+		Color = info.HandleColor,
+		Material = Enum.Material.Metal,
+		CFrame = cframe,
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+	model.PrimaryPart = handle
+
+	local guard = createPart({
+		Name = "Guard",
+		Size = Vector3.new(0.55 * scale, 0.42 * scale, 2.3 * scale),
+		Color = rarity.Color,
+		Material = Enum.Material.Metal,
+		CFrame = cframe * CFrame.new(0, 0.72 * scale, 0),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+
+	local bladeLength = 4.2 * scale
+	local blade = createPart({
+		Name = "Blade",
+		Size = Vector3.new(0.24 * scale, bladeLength, 0.9 * scale),
+		Color = info.BladeColor,
+		Material = if rarity.Order >= 3 then Enum.Material.Neon else Enum.Material.Metal,
+		CFrame = cframe * CFrame.new(0, 0.72 * scale + bladeLength / 2, 0),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+
+	local coreGlow = createPart({
+		Name = "CoreGlow",
+		Size = Vector3.new(0.28 * scale, bladeLength * 0.88, 0.3 * scale),
+		Color = info.GlowColor,
+		Material = Enum.Material.Neon,
+		CFrame = blade.CFrame,
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+
+	local pommel = createPart({
+		Name = "Pommel",
+		Shape = Enum.PartType.Ball,
+		Size = Vector3.new(0.62 * scale, 0.62 * scale, 0.62 * scale),
+		Color = rarity.Color,
+		Material = Enum.Material.Neon,
+		CFrame = cframe * CFrame.new(0, -0.78 * scale, 0),
+		Anchored = anchored,
+		CanCollide = false,
+		Parent = model,
+	})
+
+	if not anchored then
+		weldParts(handle, guard)
+		weldParts(handle, blade)
+		weldParts(handle, coreGlow)
+		weldParts(handle, pommel)
+	end
+
+	if rarity.Order >= 2 then
+		local particles = Instance.new("ParticleEmitter")
+		particles.Color = ColorSequence.new(rarity.Color, info.GlowColor)
+		particles.Size = NumberSequence.new({
+			NumberSequenceKeypoint.new(0, 0.38 * scale),
+			NumberSequenceKeypoint.new(1, 0),
+		})
+		particles.Lifetime = NumberRange.new(0.6, 1.2)
+		particles.Rate = 6 * rarity.Order
+		particles.Speed = NumberRange.new(1.5, 4)
+		particles.LightEmission = 1
+		particles.Parent = blade
+	end
+
+	return model
+end
+
+function ModelBuilder.CreateFenceRect(parent: Instance, center: Vector3, width: number, depth: number, color: Color3, leaveFrontGap: boolean?)
+	local folder = Instance.new("Model")
+	folder.Name = "Fence"
+	folder.Parent = parent
+
+	local halfW = width / 2
+	local halfD = depth / 2
+
+	local corners = {
+		Vector3.new(-halfW, 2.0, -halfD),
+		Vector3.new(halfW, 2.0, -halfD),
+		Vector3.new(-halfW, 2.0, halfD),
+		Vector3.new(halfW, 2.0, halfD),
+	}
+	for _, c in ipairs(corners) do
+		createPart({
+			Size = Vector3.new(1.0, 4.0, 1.0),
+			CFrame = CFrame.new(center + c),
+			Color = color,
+			Material = Enum.Material.WoodPlanks,
+			CanCollide = true,
+			Parent = folder,
+		})
+	end
+
+	for _, yH in ipairs({ 1.2, 2.8 }) do
+		createPart({
+			Size = Vector3.new(width, 0.45, 0.45),
+			CFrame = CFrame.new(center + Vector3.new(0, yH, halfD)),
+			Color = color,
+			Material = Enum.Material.WoodPlanks,
+			CanCollide = true,
+			Parent = folder,
+		})
+		createPart({
+			Size = Vector3.new(0.45, 0.45, depth),
+			CFrame = CFrame.new(center + Vector3.new(-halfW, yH, 0)),
+			Color = color,
+			Material = Enum.Material.WoodPlanks,
+			CanCollide = true,
+			Parent = folder,
+		})
+		createPart({
+			Size = Vector3.new(0.45, 0.45, depth),
+			CFrame = CFrame.new(center + Vector3.new(halfW, yH, 0)),
+			Color = color,
+			Material = Enum.Material.WoodPlanks,
+			CanCollide = true,
+			Parent = folder,
+		})
+		if not leaveFrontGap then
+			createPart({
+				Size = Vector3.new(width, 0.45, 0.45),
+				CFrame = CFrame.new(center + Vector3.new(0, yH, -halfD)),
+				Color = color,
+				Material = Enum.Material.WoodPlanks,
+				CanCollide = true,
+				Parent = folder,
+			})
+		else
+			local segW = (width - 12) / 2
+			if segW > 1 then
+				createPart({
+					Size = Vector3.new(segW, 0.45, 0.45),
+					CFrame = CFrame.new(center + Vector3.new(-halfW + segW / 2, yH, -halfD)),
+					Color = color,
+					Material = Enum.Material.WoodPlanks,
+					CanCollide = true,
+					Parent = folder,
+				})
+				createPart({
+					Size = Vector3.new(segW, 0.45, 0.45),
+					CFrame = CFrame.new(center + Vector3.new(halfW - segW / 2, yH, -halfD)),
+					Color = color,
+					Material = Enum.Material.WoodPlanks,
+					CanCollide = true,
+					Parent = folder,
+				})
+			end
+		end
+	end
+end
+
+function ModelBuilder.CreatePersonalTreadmill(ownerName: string, centerPos: Vector3, level: number, gainPerTick: number, upgradeCost: number): (Model, Part, ProximityPrompt, TextLabel, TextLabel)
+	local tm = Instance.new("Model")
+	tm.Name = "PersonalTreadmill_" .. ownerName
+
+	local belt = createPart({
+		Name = "LavaBelt",
+		Size = Vector3.new(9, 1.0, 18),
+		CFrame = CFrame.new(centerPos),
+		Color = Color3.fromRGB(255, 85, 20),
+		Material = Enum.Material.CrackedLava,
+		Parent = tm,
+	})
+	tm.PrimaryPart = belt
+	ModelBuilder.ApplySurfaceTexture(belt, "rbxassetid://6372755229", { Enum.NormalId.Top }, 6, 0.55, Color3.fromRGB(255, 220, 60))
+
+	for _, side in ipairs({ -5.1, 5.1 }) do
+		createPart({
+			Size = Vector3.new(1.4, 2.0, 19),
+			CFrame = CFrame.new(centerPos + Vector3.new(side, 0.5, 0)),
+			Color = Color3.fromRGB(65, 42, 35),
+			Material = Enum.Material.Basalt,
+			Parent = tm,
+		})
+	end
+
+	for _, side in ipairs({ -5.1, 5.1 }) do
+		local pillar = createPart({
+			Size = Vector3.new(1.8, 9.5, 1.8),
+			CFrame = CFrame.new(centerPos + Vector3.new(side, 4.7, -8.5)),
+			Color = Color3.fromRGB(75, 45, 35),
+			Material = Enum.Material.Brick,
+			Parent = tm,
+		})
+		local fire = Instance.new("Fire")
+		fire.Size = 4
+		fire.Heat = 6
+		fire.Parent = pillar
+	end
+
+	createPart({
+		Size = Vector3.new(12.2, 1.8, 2.0),
+		CFrame = CFrame.new(centerPos + Vector3.new(0, 9.5, -8.5)),
+		Color = Color3.fromRGB(55, 35, 28),
+		Material = Enum.Material.Brick,
+		Parent = tm,
+	})
+
+	local bg = Instance.new("BillboardGui")
+	bg.Size = UDim2.fromOffset(250, 62)
+	bg.StudsOffset = Vector3.new(0, 12.5, -8.5)
+	bg.AlwaysOnTop = true
+	bg.MaxDistance = 120
+	bg.Parent = belt
+
+	local titleLbl = Instance.new("TextLabel")
+	titleLbl.Size = UDim2.fromScale(1, 1)
+	titleLbl.BackgroundTransparency = 1
+	titleLbl.Font = Enum.Font.FredokaOne
+	titleLbl.TextColor3 = Color3.fromRGB(255, 75, 230)
+	titleLbl.TextStrokeTransparency = 0
+	titleLbl.TextScaled = true
+	titleLbl.Text = string.format("👟 Tapis de %s (Niv. %d)\n+%s Vitesse / sec (Reste dessus !)", ownerName, level, GameConfig.FormatNumber(gainPerTick))
+	titleLbl.Parent = bg
+
+	local board = createPart({
+		Name = "UpgradeStand",
+		Size = Vector3.new(6.2, 5.2, 1.1),
+		CFrame = CFrame.new(centerPos + Vector3.new(9.5, 3.0, -2)) * CFrame.Angles(0, math.rad(-22), 0),
+		Color = Color3.fromRGB(22, 26, 36),
+		Material = Enum.Material.SmoothPlastic,
+		Parent = tm,
+	})
+
+	local boardBg = Instance.new("BillboardGui")
+	boardBg.Size = UDim2.fromOffset(190, 75)
+	boardBg.StudsOffset = Vector3.new(0, 0.5, 0)
+	boardBg.AlwaysOnTop = true
+	boardBg.MaxDistance = 90
+	boardBg.Parent = board
+
+	local boardLbl = Instance.new("TextLabel")
+	boardLbl.Size = UDim2.fromScale(1, 1)
+	boardLbl.BackgroundTransparency = 1
+	boardLbl.Font = Enum.Font.FredokaOne
+	boardLbl.TextColor3 = Color3.fromRGB(85, 255, 110)
+	boardLbl.TextStrokeTransparency = 0
+	boardLbl.TextScaled = true
+	boardLbl.Text = string.format("Améliorer Tapis\nNiv. %d -> Niv. %d\n💵 $%s", level, level + 1, GameConfig.FormatNumber(upgradeCost))
+	boardLbl.Parent = boardBg
+
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.ObjectText = "Tapis de " .. ownerName
+	prompt.ActionText = "Améliorer ($" .. GameConfig.FormatNumber(upgradeCost) .. ")"
+	prompt.HoldDuration = 0
+	prompt.MaxActivationDistance = 14
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = board
+
+	return tm, belt, prompt, titleLbl, boardLbl
+end
+
+return ModelBuilder
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="ServerScriptService" referent="5">
+    <Properties>
+      <string name="Name">ServerScriptService</string>
+    </Properties>
+    <Item class="Script" referent="6">
+      <Properties>
+        <string name="Name">Server</string>
+        <token name="RunContext">0</token>
+        <string name="Source"><![CDATA[--!strict
+-- Serveur principal de "Voler une Épée" :
+-- 1. Tapis de course : il suffit d'être dessus (sans bouger) pour gagner de la Vitesse chaque seconde.
+-- 2. Pierres d'Épée : ramassage uniquement par clic ou touche E (plus de ramassage accidentel au contact).
+-- 3. Éclosion : l'épée reste sur son emplacement dans la base (pas dans la main du joueur) et peut être récupérée dans l'inventaire pour être revendue.
+-- 4. Récolte d'Argent : l'argent s'accumule sur chaque épée et se récupère en marchant sur le bouton vert devant l'épée !
+-- 5. Décorations dans chaque zone (Cactus dans le désert, etc.) et Vendeurs/Gardes style vrais personnages Roblox.
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local GameConfig = require(Shared:WaitForChild("GameConfig"))
+local ModelBuilder = require(Shared:WaitForChild("ModelBuilder"))
+
+local Remotes = ReplicatedStorage:FindFirstChild("Remotes")
+if Remotes then
+	Remotes:Destroy()
+end
+Remotes = Instance.new("Folder")
+Remotes.Name = "Remotes"
+Remotes.Parent = ReplicatedStorage
+
+local StateUpdateEvent = Instance.new("RemoteEvent")
+StateUpdateEvent.Name = "StateUpdate"
+StateUpdateEvent.Parent = Remotes
+
+local NotificationEvent = Instance.new("RemoteEvent")
+NotificationEvent.Name = "Notification"
+NotificationEvent.Parent = Remotes
+
+local SwordRevealEvent = Instance.new("RemoteEvent")
+SwordRevealEvent.Name = "SwordReveal"
+SwordRevealEvent.Parent = Remotes
+
+local ActionEvent = Instance.new("RemoteEvent")
+ActionEvent.Name = "PlayerAction"
+ActionEvent.Parent = Remotes
+
+local PopupEvent = Instance.new("RemoteEvent")
+PopupEvent.Name = "FloatingPopup"
+PopupEvent.Parent = Remotes
+
+local OpenMerchantEvent = Instance.new("RemoteEvent")
+OpenMerchantEvent.Name = "OpenMerchant"
+OpenMerchantEvent.Parent = Remotes
+
+local MapFolder = Workspace:FindFirstChild("StealASwordMap")
+if MapFolder then
+	MapFolder:Destroy()
+end
+MapFolder = Instance.new("Folder")
+MapFolder.Name = "StealASwordMap"
+MapFolder.Parent = Workspace
+
+local defaultBaseplate = Workspace:FindFirstChild("Baseplate")
+if defaultBaseplate and defaultBaseplate:IsA("BasePart") then
+	defaultBaseplate.Transparency = 1
+	defaultBaseplate.CanCollide = false
+end
+
+local function createPart(props: { [string]: any }): Part
+	local p = Instance.new("Part")
+	p.Anchored = if props.Anchored ~= nil then props.Anchored else true
+	p.CanCollide = if props.CanCollide ~= nil then props.CanCollide else true
+	p.Material = props.Material or Enum.Material.Plastic
+	p.Color = props.Color or Color3.fromRGB(200, 200, 200)
+	p.Size = props.Size or Vector3.new(4, 1, 4)
+	p.CFrame = props.CFrame or CFrame.new()
+	p.TopSurface = props.TopSurface or Enum.SurfaceType.Studs
+	p.BottomSurface = Enum.SurfaceType.Smooth
+	if props.Name then
+		p.Name = props.Name
+	end
+	if props.Transparency then
+		p.Transparency = props.Transparency
+	end
+	if props.Shape then
+		p.Shape = props.Shape
+	end
+	if props.Parent then
+		p.Parent = props.Parent
+	end
+	return p
+end
+
+local function createStyledWall(parent: Instance, cframe: CFrame, size: Vector3, wallColor: Color3?)
+	local wColor = wallColor or Color3.fromRGB(185, 140, 88)
+	local wall = createPart({
+		Name = "PerimeterWall",
+		Size = size,
+		CFrame = cframe,
+		Color = wColor,
+		Material = Enum.Material.Brick,
+		TopSurface = Enum.SurfaceType.Studs,
+		Parent = parent,
+	})
+	ModelBuilder.ApplySurfaceTexture(
+		wall,
+		"rbxassetid://6372755229",
+		{ Enum.NormalId.Front, Enum.NormalId.Back, Enum.NormalId.Left, Enum.NormalId.Right },
+		12,
+		0.72,
+		Color3.new(0, 0, 0)
+	)
+	createPart({
+		Name = "WallTopGreen",
+		Size = Vector3.new(size.X + 0.6, 2.5, size.Z + 0.6),
+		CFrame = cframe * CFrame.new(0, size.Y / 2 + 1.25, 0),
+		Color = Color3.fromRGB(65, 225, 45),
+		Material = Enum.Material.Plastic,
+		TopSurface = Enum.SurfaceType.Studs,
+		Parent = parent,
+	})
+	return wall
+end
+
+type BaseSlot = {
+	SlotIndex: number,
+	State: "Empty" | "Forging" | "Ready" | "Sword",
+	StoneId: string?,
+	EndTime: number?,
+	SwordItem: GameConfig.OwnedSwordItem?,
+	AccumulatedMoney: number, -- Argent accumulé par cette épée en attendant que le joueur passe sur le bouton !
+	PadPart: Part,
+	CollectButtonPart: Part, -- Bouton vert devant l'épée pour récolter l'argent accumulé
+	CollectLabel: TextLabel,
+	TitleLabel: TextLabel,
+	SubLabel: TextLabel,
+	PrimaryPrompt: ProximityPrompt,
+	VisualModel: Model?,
+}
+
+type PersonalTreadmillData = {
+	Model: Model,
+	Belt: Part,
+	Prompt: ProximityPrompt,
+	TitleLabel: TextLabel,
+	BoardLabel: TextLabel,
+}
+
+type PlayerSession = {
+	Player: Player,
+	Money: number,
+	TrainedSpeed: number,
+	SlowMode: boolean,
+	SpeedBoostUntil: number,
+	MoneyBoostUntil: number,
+	CarryingStoneId: string?,
+	CarriedModel: Model?,
+	OwnedTrails: { [string]: boolean },
+	EquippedTrailId: string?,
+	Inventory: { GameConfig.OwnedSwordItem }, -- Toutes les épées possédées (qu'elles soient posées sur la base ou rangées en sac)
+	Discovered: { [string]: boolean },
+	Upgrades: {
+		SpeedLevel: number,
+		CarryStrength: number,
+		ForgeSpeed: number,
+		SlotCount: number,
+	},
+	BaseIndex: number,
+	BaseCenter: Vector3,
+	BaseModel: Model,
+	SpawnCFrame: CFrame,
+	Slots: { BaseSlot },
+	Treadmill: PersonalTreadmillData?,
+	NextSwordUidCounter: number,
+}
+
+local PlayerSessions: { [Player]: PlayerSession } = {}
+local AssignedBases: { [number]: Player? } = {}
+local NightEventCycleEnd = os.clock() + 230
+
+local RUNWAY_START_Z = 35
+local CORRIDOR_WIDTH = 120
+local HUB_WIDTH = 225
+local HUB_DEPTH = 150
+local HUB_CENTER = Vector3.new(0, 0, RUNWAY_START_Z + HUB_DEPTH / 2)
+
+local function getTrailMultipliers(session: PlayerSession): (number, number)
+	if not session.EquippedTrailId then
+		return 1.0, 1.0
+	end
+	for _, t in ipairs(GameConfig.Trails) do
+		if t.Id == session.EquippedTrailId then
+			return t.SpeedMultiplier, t.MoneyMultiplier
+		end
+	end
+	return 1.0, 1.0
+end
+
+local function getPlayerTotalSpeed(session: PlayerSession): number
+	local spd = 18 + session.TrainedSpeed
+	local trailSpdMult, _ = getTrailMultipliers(session)
+	spd *= trailSpdMult
+	if os.clock() < session.SpeedBoostUntil then
+		spd *= 2
+	end
+	return math.floor(spd)
+end
+
+local function getPlayerMoneyPerSec(session: PlayerSession): number
+	local total = 0
+	for _, slot in ipairs(session.Slots) do
+		if slot.State == "Sword" and slot.SwordItem then
+			total += slot.SwordItem.MoneyPerSec
+		end
+	end
+	local _, trailMoneyMult = getTrailMultipliers(session)
+	total *= trailMoneyMult
+	if os.clock() < session.MoneyBoostUntil then
+		total *= 2
+	end
+	return math.floor(total)
+end
+
+local function applyCharacterWalkSpeed(session: PlayerSession)
+	local char = session.Player.Character
+	if not char then
+		return
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then
+		return
+	end
+
+	local statSpeed = getPlayerTotalSpeed(session)
+	local walkSpeed = GameConfig.StatSpeedToWalkSpeed(statSpeed)
+
+	if session.SlowMode then
+		walkSpeed = 20
+	end
+
+	if session.CarryingStoneId then
+		local slowFactor = 0.72
+		for _, tier in ipairs(GameConfig.StoneTiers) do
+			if tier.Id == session.CarryingStoneId then
+				slowFactor = tier.CarrySlowFactor
+				break
+			end
+		end
+		local bonus = (session.Upgrades.CarryStrength - 1) * 0.03
+		walkSpeed = math.max(13, walkSpeed * math.clamp(slowFactor + bonus, 0.45, 0.95))
+	end
+
+	hum.WalkSpeed = walkSpeed
+end
+
+local function applyTrailOnCharacter(session: PlayerSession)
+	local char = session.Player.Character
+	if not char then
+		return
+	end
+	local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	for _, child in ipairs(hrp:GetChildren()) do
+		if child.Name == "TrailAtt0" or child.Name == "TrailAtt1" or child.Name == "PlayerTrailEffect" then
+			child:Destroy()
+		end
+	end
+
+	if not session.EquippedTrailId then
+		return
+	end
+
+	local foundTrail: GameConfig.TrailInfo? = nil
+	for _, t in ipairs(GameConfig.Trails) do
+		if t.Id == session.EquippedTrailId then
+			foundTrail = t
+			break
+		end
+	end
+	if not foundTrail then
+		return
+	end
+
+	local att0 = Instance.new("Attachment")
+	att0.Name = "TrailAtt0"
+	att0.Position = Vector3.new(0, 1.5, 0)
+	att0.Parent = hrp
+
+	local att1 = Instance.new("Attachment")
+	att1.Name = "TrailAtt1"
+	att1.Position = Vector3.new(0, -1.8, 0)
+	att1.Parent = hrp
+
+	local trail = Instance.new("Trail")
+	trail.Name = "PlayerTrailEffect"
+	trail.Attachment0 = att0
+	trail.Attachment1 = att1
+	trail.Color = ColorSequence.new(foundTrail.Color1, foundTrail.Color2)
+	trail.Transparency = NumberSequence.new({
+		NumberSequenceKeypoint.new(0, 0.05),
+		NumberSequenceKeypoint.new(1, 1),
+	})
+	trail.Lifetime = 0.65
+	trail.LightEmission = 1
+	trail.MinLength = 0.1
+	trail.Parent = hrp
+end
+
+-- Vérifie quelles épées sont actuellement posées sur la base
+local function getPlacedSwordUids(session: PlayerSession): { [string]: boolean }
+	local placed: { [string]: boolean } = {}
+	for _, slot in ipairs(session.Slots) do
+		if slot.State == "Sword" and slot.SwordItem then
+			placed[slot.SwordItem.Uid] = true
+		end
+	end
+	return placed
+end
+
+local function syncPlayerState(session: PlayerSession)
+	local mps = getPlayerMoneyPerSec(session)
+	local spd = getPlayerTotalSpeed(session)
+	local trailSpdMult, trailMoneyMult = getTrailMultipliers(session)
+
+	local leaderstats = session.Player:FindFirstChild("leaderstats")
+	if leaderstats then
+		local mpsVal = leaderstats:FindFirstChild("Money/s") :: StringValue?
+		if mpsVal then
+			mpsVal.Value = GameConfig.FormatNumber(mps)
+		end
+		local spdVal = leaderstats:FindFirstChild("Vitesse") :: StringValue?
+		if spdVal then
+			spdVal.Value = GameConfig.FormatNumber(spd)
+		end
+	end
+
+	StateUpdateEvent:FireClient(session.Player, {
+		Money = session.Money,
+		MoneyPerSec = mps,
+		TotalSpeed = spd,
+		TreadmillLevel = session.Upgrades.SpeedLevel,
+		TreadmillGain = GameConfig.GetTreadmillGainPerTick(session.Upgrades.SpeedLevel),
+		SlowMode = session.SlowMode,
+		CarryingStoneId = session.CarryingStoneId,
+		PlacedSwordUids = getPlacedSwordUids(session),
+		OwnedTrails = session.OwnedTrails,
+		EquippedTrailId = session.EquippedTrailId,
+		TrailSpeedMult = trailSpdMult,
+		TrailMoneyMult = trailMoneyMult,
+		Inventory = session.Inventory,
+		Discovered = session.Discovered,
+		Upgrades = session.Upgrades,
+		NightRemaining = math.max(0, math.ceil(NightEventCycleEnd - os.clock())),
+		PotionRemaining = math.max(0, math.ceil(math.max(session.SpeedBoostUntil, session.MoneyBoostUntil) - os.clock())),
+	})
+end
+
+local function clearCarriedStone(session: PlayerSession)
+	session.CarryingStoneId = nil
+	if session.CarriedModel then
+		session.CarriedModel:Destroy()
+		session.CarriedModel = nil
+	end
+	applyCharacterWalkSpeed(session)
+	syncPlayerState(session)
+end
+
+local function giveCarriedStone(session: PlayerSession, stoneTier: GameConfig.StoneTier)
+	clearCarriedStone(session)
+	local char = session.Player.Character
+	if not char then
+		return
+	end
+	local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+	if not hrp then
+		return
+	end
+
+	session.CarryingStoneId = stoneTier.Id
+	local stoneModel = ModelBuilder.CreateSwordStoneModel(stoneTier, hrp.CFrame * CFrame.new(0, 3.2, 0), true)
+	stoneModel.Name = "CarriedSwordStone"
+	stoneModel.Parent = char
+
+	if stoneModel.PrimaryPart then
+		local weld = Instance.new("WeldConstraint")
+		weld.Part0 = hrp
+		weld.Part1 = stoneModel.PrimaryPart
+		weld.Parent = stoneModel.PrimaryPart
+	end
+
+	session.CarriedModel = stoneModel
+	applyCharacterWalkSpeed(session)
+	syncPlayerState(session)
+end
+
+-- ============================================================================
+-- GESTION DU TAPIS DE COURSE PERSONNEL
+-- ============================================================================
+
+local function updateTreadmillLabels(session: PlayerSession)
+	local tm = session.Treadmill
+	if not tm then
+		return
+	end
+	local lvl = session.Upgrades.SpeedLevel
+	local gain = GameConfig.GetTreadmillGainPerTick(lvl)
+	local cost = GameConfig.GetUpgradeCost("SpeedLevel", lvl)
+	tm.TitleLabel.Text = string.format("👟 Tapis de %s (Niv. %d)\n+%s Vitesse / sec (Reste dessus !)", session.Player.DisplayName, lvl, GameConfig.FormatNumber(gain))
+	if lvl >= GameConfig.Upgrades.SpeedLevel.MaxLevel then
+		tm.BoardLabel.Text = string.format("Tapis Niveau MAX (%d)", lvl)
+		tm.Prompt.ActionText = "Niveau MAX"
+	else
+		tm.BoardLabel.Text = string.format("Améliorer Tapis\nNiv. %d -> Niv. %d\n💵 $%s", lvl, lvl + 1, GameConfig.FormatNumber(cost))
+		tm.Prompt.ActionText = "Améliorer ($" .. GameConfig.FormatNumber(cost) .. ")"
+	end
+end
+
+local function spawnOrMovePersonalTreadmill(session: PlayerSession, targetPos: Vector3, notifyPlayer: boolean)
+	if targetPos.Z <= RUNWAY_START_Z + 10 then
+		NotificationEvent:FireClient(
+			session.Player,
+			"⛔ Impossible de poser ton Tapis dans les Zones de Pierres ! Pose-le dans le Hub !",
+			Color3.fromRGB(255, 80, 80)
+		)
+		return
+	end
+
+	if session.Treadmill and session.Treadmill.Model then
+		session.Treadmill.Model:Destroy()
+		session.Treadmill = nil
+	end
+
+	local cleanPos = Vector3.new(
+		math.clamp(targetPos.X, -HUB_WIDTH / 2 + 16, HUB_WIDTH / 2 - 16),
+		0.6,
+		math.clamp(targetPos.Z, RUNWAY_START_Z + 14, RUNWAY_START_Z + HUB_DEPTH - 14)
+	)
+
+	local lvl = session.Upgrades.SpeedLevel
+	local gain = GameConfig.GetTreadmillGainPerTick(lvl)
+	local cost = GameConfig.GetUpgradeCost("SpeedLevel", lvl)
+
+	local model, belt, prompt, titleLbl, boardLbl = ModelBuilder.CreatePersonalTreadmill(
+		session.Player.DisplayName,
+		cleanPos,
+		lvl,
+		gain,
+		cost
+	)
+	model.Parent = MapFolder
+
+	prompt.Triggered:Connect(function(triggerPlr: Player)
+		if triggerPlr ~= session.Player then
+			NotificationEvent:FireClient(
+				triggerPlr,
+				"⛔ Ce Tapis appartient à " .. session.Player.DisplayName .. " !",
+				Color3.fromRGB(255, 95, 95)
+			)
+			return
+		end
+		local curLvl = session.Upgrades.SpeedLevel
+		if curLvl >= GameConfig.Upgrades.SpeedLevel.MaxLevel then
+			return
+		end
+		local upgCost = GameConfig.GetUpgradeCost("SpeedLevel", curLvl)
+		if session.Money < upgCost then
+			NotificationEvent:FireClient(
+				session.Player,
+				"Pas assez d'Argent ! Il faut $" .. GameConfig.FormatNumber(upgCost),
+				Color3.fromRGB(255, 85, 85)
+			)
+			return
+		end
+		session.Money -= upgCost
+		session.Upgrades.SpeedLevel += 1
+		updateTreadmillLabels(session)
+		syncPlayerState(session)
+		NotificationEvent:FireClient(
+			session.Player,
+			string.format("👟 Tapis amélioré au Niveau %d (+%s Vitesse/sec) !", session.Upgrades.SpeedLevel, GameConfig.FormatNumber(GameConfig.GetTreadmillGainPerTick(session.Upgrades.SpeedLevel))),
+			Color3.fromRGB(85, 255, 130)
+		)
+	end)
+
+	session.Treadmill = {
+		Model = model,
+		Belt = belt,
+		Prompt = prompt,
+		TitleLabel = titleLbl,
+		BoardLabel = boardLbl,
+	}
+
+	if notifyPlayer then
+		NotificationEvent:FireClient(
+			session.Player,
+			"👟 Ton Tapis de Course a été posé ici ! Reste simplement dessus pour gagner de la vitesse !",
+			Color3.fromRGB(255, 95, 235)
+		)
+	end
+end
+
+local function giveTreadmillSpawnerTool(player: Player)
+	local backpack = player:WaitForChild("Backpack", 5)
+	if not backpack then
+		return
+	end
+	if backpack:FindFirstChild("Poser Tapis") or (player.Character and player.Character:FindFirstChild("Poser Tapis")) then
+		return
+	end
+
+	local tool = Instance.new("Tool")
+	tool.Name = "Poser Tapis"
+	tool.RequiresHandle = true
+	tool.CanBeDropped = false
+
+	createPart({
+		Name = "Handle",
+		Size = Vector3.new(1.4, 0.5, 2.0),
+		Color = Color3.fromRGB(255, 85, 25),
+		Material = Enum.Material.Neon,
+		Anchored = false,
+		CanCollide = false,
+		Parent = tool,
+	})
+
+	tool.Activated:Connect(function()
+		local sess = PlayerSessions[player]
+		if not sess then
+			return
+		end
+		local char = player.Character
+		local hrp = if char then char:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+		if hrp then
+			local forwardPos = hrp.Position + hrp.CFrame.LookVector * 12
+			spawnOrMovePersonalTreadmill(sess, forwardPos, true)
+		end
+	end)
+
+	tool.Parent = backpack
+end
+
+-- ============================================================================
+-- GESTION DES EMPLACEMENTS DE BASE & BOUTON DE RÉCOLTE D'ARGENT DEVANT L'ÉPÉE
+-- ============================================================================
+
+local function refreshSlotVisuals(session: PlayerSession, slot: BaseSlot)
+	local unlocked = slot.SlotIndex <= session.Upgrades.SlotCount
+	if not unlocked then
+		slot.PadPart.Color = Color3.fromRGB(70, 75, 85)
+		slot.PadPart.Transparency = 0.5
+		slot.CollectButtonPart.Transparency = 1
+		slot.CollectLabel.Text = ""
+		slot.PrimaryPrompt.Enabled = false
+		slot.TitleLabel.Text = "🔒 Verrouillé"
+		slot.TitleLabel.TextColor3 = Color3.fromRGB(165, 170, 180)
+		slot.SubLabel.Text = "Boutique (+Emplacement)"
+		return
+	end
+
+	slot.PadPart.Transparency = 0
+	if slot.State == "Empty" then
+		slot.PadPart.Color = Color3.fromRGB(120, 235, 65)
+		slot.CollectButtonPart.Transparency = 0.75
+		slot.CollectButtonPart.Color = Color3.fromRGB(90, 110, 90)
+		slot.CollectLabel.Text = ""
+		slot.TitleLabel.Text = "Emplacement Libre"
+		slot.TitleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+		slot.SubLabel.Text = "Rentre avec une Pierre !"
+		slot.PrimaryPrompt.Enabled = true
+		slot.PrimaryPrompt.ObjectText = "Emplacement #" .. slot.SlotIndex
+		slot.PrimaryPrompt.ActionText = "Poser Pierre / Épée"
+
+	elseif slot.State == "Forging" then
+		slot.PadPart.Color = Color3.fromRGB(255, 185, 45)
+		slot.CollectButtonPart.Transparency = 0.75
+		slot.CollectLabel.Text = ""
+		local rem = if slot.EndTime then math.max(0, math.ceil(slot.EndTime - os.clock())) else 0
+		slot.TitleLabel.Text = "Éclosion en cours..."
+		slot.TitleLabel.TextColor3 = Color3.fromRGB(255, 210, 65)
+		slot.SubLabel.Text = "⏳ " .. GameConfig.FormatTime(rem)
+		slot.PrimaryPrompt.Enabled = false
+
+	elseif slot.State == "Ready" then
+		slot.PadPart.Color = Color3.fromRGB(255, 65, 65)
+		slot.CollectButtonPart.Transparency = 0.75
+		slot.CollectLabel.Text = ""
+		slot.TitleLabel.Text = "Pierre\nPrête!"
+		slot.TitleLabel.TextColor3 = Color3.fromRGB(255, 65, 65)
+		slot.SubLabel.Text = "Éclosion !\n[E] Ouvrir !"
+		slot.PrimaryPrompt.Enabled = true
+		slot.PrimaryPrompt.ObjectText = "Pierre Prête !"
+		slot.PrimaryPrompt.ActionText = "Faire éclore l'Épée !"
+
+	elseif slot.State == "Sword" and slot.SwordItem then
+		local rarity = GameConfig.Rarities[slot.SwordItem.Rarity] or GameConfig.Rarities.Common
+		slot.PadPart.Color = rarity.Color
+		slot.CollectButtonPart.Transparency = 0
+		slot.CollectButtonPart.Color = Color3.fromRGB(45, 235, 65)
+		slot.CollectLabel.Text = "💵 $" .. GameConfig.FormatNumber(slot.AccumulatedMoney)
+		slot.TitleLabel.Text = string.format("[%s] %s", rarity.Name, slot.SwordItem.Name)
+		slot.TitleLabel.TextColor3 = rarity.Color
+		slot.SubLabel.Text = string.format("+$%s / sec", GameConfig.FormatNumber(slot.SwordItem.MoneyPerSec))
+		slot.PrimaryPrompt.Enabled = true
+		slot.PrimaryPrompt.ObjectText = slot.SwordItem.Name
+		slot.PrimaryPrompt.ActionText = "Récupérer dans l'inventaire"
+	end
+end
+
+local function refreshAllBaseSlots(session: PlayerSession)
+	for _, slot in ipairs(session.Slots) do
+		refreshSlotVisuals(session, slot)
+	end
+end
+
+-- Place une épée spécifique de l'inventaire sur un emplacement libre de la base
+local function placeSwordItemOnSlot(session: PlayerSession, slot: BaseSlot, item: GameConfig.OwnedSwordItem)
+	if slot.SlotIndex > session.Upgrades.SlotCount or slot.State ~= "Empty" then
+		return
+	end
+	if slot.VisualModel then
+		slot.VisualModel:Destroy()
+	end
+
+	slot.State = "Sword"
+	slot.SwordItem = item
+	slot.AccumulatedMoney = 0
+
+	local swordModel = ModelBuilder.CreateSwordModel(
+		item.SwordId,
+		slot.PadPart.CFrame * CFrame.new(0, 3.6, 0) * CFrame.Angles(0, 0, math.rad(180)),
+		true
+	)
+	swordModel.Parent = session.BaseModel
+	slot.VisualModel = swordModel
+
+	refreshSlotVisuals(session, slot)
+	syncPlayerState(session)
+end
+
+local function placeCarriedStoneOnSlot(session: PlayerSession, slot: BaseSlot): boolean
+	if slot.SlotIndex > session.Upgrades.SlotCount or slot.State ~= "Empty" or not session.CarryingStoneId then
+		return false
+	end
+
+	local stoneId = session.CarryingStoneId
+	local foundTier: GameConfig.StoneTier? = nil
+	for _, tier in ipairs(GameConfig.StoneTiers) do
+		if tier.Id == stoneId then
+			foundTier = tier
+			break
+		end
+	end
+	if not foundTier then
+		return false
+	end
+
+	clearCarriedStone(session)
+
+	local speedMult = 1 + (session.Upgrades.ForgeSpeed - 1) * 0.25
+	local duration = math.max(4, math.ceil(foundTier.ForgeTime / speedMult))
+
+	slot.State = "Forging"
+	slot.StoneId = stoneId
+	slot.EndTime = os.clock() + duration
+	slot.AccumulatedMoney = 0
+
+	if slot.VisualModel then
+		slot.VisualModel:Destroy()
+	end
+	local stoneModel = ModelBuilder.CreateSwordStoneModel(foundTier, slot.PadPart.CFrame * CFrame.new(0, 1.2, 0), false)
+	stoneModel.Parent = session.BaseModel
+	slot.VisualModel = stoneModel
+
+	refreshSlotVisuals(session, slot)
+	NotificationEvent:FireClient(
+		session.Player,
+		string.format("🪨 %s déposée dans ta base ! Éclosion dans %s", foundTier.Name, GameConfig.FormatTime(duration)),
+		foundTier.CrystalColor
+	)
+	return true
+end
+
+-- Éclosion : l'épée reste sur son emplacement dans la base (NE va PAS dans la main du joueur !)
+local function hatchStoneOnSlot(session: PlayerSession, slot: BaseSlot)
+	if slot.State ~= "Ready" or not slot.StoneId then
+		return
+	end
+
+	local forgedStoneId = slot.StoneId
+	slot.StoneId = nil
+	slot.EndTime = nil
+	if slot.VisualModel then
+		slot.VisualModel:Destroy()
+		slot.VisualModel = nil
+	end
+
+	session.NextSwordUidCounter += 1
+	local wonItem = GameConfig.RollRandomSwordFromStone(forgedStoneId, session.NextSwordUidCounter)
+	local rarityInfo = GameConfig.Rarities[wonItem.Rarity] or GameConfig.Rarities.Common
+
+	table.insert(session.Inventory, wonItem)
+	session.Discovered[wonItem.SwordId] = true
+
+	-- L'épée reste directement sur son emplacement dans la base et commence à accumuler de l'argent !
+	placeSwordItemOnSlot(session, slot, wonItem)
+
+	SwordRevealEvent:FireClient(session.Player, {
+		SwordId = wonItem.SwordId,
+		Name = wonItem.Name,
+		Rarity = rarityInfo.Name,
+		RarityColor = rarityInfo.Color,
+		MoneyPerSec = wonItem.MoneyPerSec,
+		SellPrice = wonItem.SellPrice,
+	})
+end
+
+-- Récolte tout l'argent accumulé sur l'emplacement quand le joueur marche sur le bouton vert devant l'épée !
+local function collectSlotMoney(session: PlayerSession, slot: BaseSlot)
+	if slot.State ~= "Sword" or slot.AccumulatedMoney <= 0 then
+		return
+	end
+	local amount = math.floor(slot.AccumulatedMoney)
+	slot.AccumulatedMoney = 0
+	session.Money += amount
+	slot.CollectLabel.Text = "💵 $0"
+	PopupEvent:FireClient(session.Player, "Money", "+$" .. GameConfig.FormatNumber(amount))
+	syncPlayerState(session)
+end
+
+-- ============================================================================
+-- CONSTRUCTION DU HUB COMPACT + MARCHANDS ROBLOX + BASES AVEC BOUTONS DE RÉCOLTE
+-- ============================================================================
+
+local hubFloor = createPart({
+	Name = "HubGrassFloor",
+	Size = Vector3.new(HUB_WIDTH, 4, HUB_DEPTH),
+	CFrame = CFrame.new(HUB_CENTER + Vector3.new(0, -2, 0)),
+	Parent = MapFolder,
+})
+ModelBuilder.ApplyFloorVisuals(hubFloor, Color3.fromRGB(102, 224, 38), Enum.Material.Plastic)
+
+local hubSpawn = Instance.new("SpawnLocation")
+hubSpawn.Name = "HubSpawn"
+hubSpawn.Anchored = true
+hubSpawn.CanCollide = false
+hubSpawn.Transparency = 1
+hubSpawn.Size = Vector3.new(12, 1, 12)
+hubSpawn.CFrame = CFrame.new(0, 0.5, 95)
+hubSpawn.Parent = MapFolder
+
+local wallHeight = 30
+createStyledWall(MapFolder, CFrame.new(0, wallHeight / 2, HUB_CENTER.Z + HUB_DEPTH / 2), Vector3.new(HUB_WIDTH + 8, wallHeight, 8))
+createStyledWall(MapFolder, CFrame.new(-HUB_WIDTH / 2, wallHeight / 2, HUB_CENTER.Z), Vector3.new(8, wallHeight, HUB_DEPTH))
+createStyledWall(MapFolder, CFrame.new(HUB_WIDTH / 2, wallHeight / 2, HUB_CENTER.Z), Vector3.new(8, wallHeight, HUB_DEPTH))
+
+local sideWallW = (HUB_WIDTH - CORRIDOR_WIDTH) / 2
+createStyledWall(
+	MapFolder,
+	CFrame.new(-CORRIDOR_WIDTH / 2 - sideWallW / 2, wallHeight / 2, RUNWAY_START_Z),
+	Vector3.new(sideWallW, wallHeight, 8)
+)
+createStyledWall(
+	MapFolder,
+	CFrame.new(CORRIDOR_WIDTH / 2 + sideWallW / 2, wallHeight / 2, RUNWAY_START_Z),
+	Vector3.new(sideWallW, wallHeight, 8)
+)
+
+-- LES 2 STANDS DE MARCHANDS AVEC VRAIS PERSONNAGES ROBLOX
+local sellStallPrompt = ModelBuilder.CreateMerchantStall(
+	MapFolder,
+	CFrame.new(-42, 0, 52) * CFrame.Angles(0, math.rad(-25), 0),
+	"💰 ACHETEUR D'ÉPÉES",
+	"Revends tes épées récupérées contre du Cash ($)",
+	Color3.fromRGB(255, 195, 40),
+	"Vendre / Gérer mes Épées",
+	"Merchant"
+)
+sellStallPrompt.Triggered:Connect(function(plr: Player)
+	OpenMerchantEvent:FireClient(plr, "SellSwords")
+end)
+
+local trailStallPrompt = ModelBuilder.CreateMerchantStall(
+	MapFolder,
+	CFrame.new(42, 0, 52) * CFrame.Angles(0, math.rad(25), 0),
+	"✨ BOUTIQUE DE SENTIERS",
+	"Traînées : Multiplicateur Vitesse & Argent",
+	Color3.fromRGB(55, 215, 255),
+	"Ouvrir Boutique de Traînées",
+	"Wizard"
+)
+trailStallPrompt.Triggered:Connect(function(plr: Player)
+	OpenMerchantEvent:FireClient(plr, "TrailsShop")
+end)
+
+local FENCE_COLORS = {
+	Color3.fromRGB(245, 248, 255),
+	Color3.fromRGB(45, 175, 255),
+	Color3.fromRGB(255, 200, 45),
+	Color3.fromRGB(170, 115, 55),
+}
+
+local function buildSimplePlayerBase(baseIndex: number, plotCenter: Vector3, fenceColor: Color3)
+	local model = Instance.new("Model")
+	model.Name = "PlayerBase_" .. baseIndex
+	model.Parent = MapFolder
+
+	local baseFloor = createPart({
+		Name = "BaseFloor",
+		Size = Vector3.new(48, 0.4, 38),
+		CFrame = CFrame.new(plotCenter + Vector3.new(0, 0.2, 0)),
+		Parent = model,
+	})
+	ModelBuilder.ApplyFloorVisuals(baseFloor, Color3.fromRGB(122, 238, 58), Enum.Material.Plastic)
+	ModelBuilder.CreateFenceRect(model, plotCenter, 48, 38, fenceColor, true)
+
+	-- Dès que le joueur rentre dans sa base avec une Pierre d'Épée, elle se pose sur un emplacement libre !
+	local autoDropZone = createPart({
+		Name = "AutoDropTrigger",
+		Size = Vector3.new(46, 10, 36),
+		CFrame = CFrame.new(plotCenter + Vector3.new(0, 5, 0)),
+		Transparency = 1,
+		CanCollide = false,
+		Parent = model,
+	})
+
+	autoDropZone.Touched:Connect(function(hit: BasePart)
+		local char = hit.Parent
+		local plr = if char then Players:GetPlayerFromCharacter(char) else nil
+		if not plr then
+			return
+		end
+		local sess = PlayerSessions[plr]
+		if sess and sess.BaseIndex == baseIndex and sess.CarryingStoneId then
+			for _, slot in ipairs(sess.Slots) do
+				if slot.SlotIndex <= sess.Upgrades.SlotCount and slot.State == "Empty" then
+					placeCarriedStoneOnSlot(sess, slot)
+					break
+				end
+			end
+		end
+	end)
+
+	local slots: { BaseSlot } = {}
+	local slotOffsets = {
+		Vector3.new(-15.5, 0.6, -6),
+		Vector3.new(-5.2, 0.6, -6),
+		Vector3.new(5.2, 0.6, -6),
+		Vector3.new(15.5, 0.6, -6),
+		Vector3.new(-15.5, 0.6, 10),
+		Vector3.new(-5.2, 0.6, 10),
+		Vector3.new(5.2, 0.6, 10),
+		Vector3.new(15.5, 0.6, 10),
+	}
+
+	for i, off in ipairs(slotOffsets) do
+		-- Socle où l'épée / la pierre est posée
+		local pad = createPart({
+			Name = "BaseSlot_" .. i,
+			Size = Vector3.new(6.8, 1.0, 6.8),
+			CFrame = CFrame.new(plotCenter + off),
+			Color = Color3.fromRGB(120, 235, 65),
+			Material = Enum.Material.SmoothPlastic,
+			TopSurface = Enum.SurfaceType.Studs,
+			Parent = model,
+		})
+
+		-- BOUTON VERT DE RÉCOLTE D'ARGENT juste devant l'emplacement de l'épée !
+		local collectBtn = createPart({
+			Name = "CollectButton_" .. i,
+			Shape = Enum.PartType.Cylinder,
+			Size = Vector3.new(0.6, 4.2, 4.2),
+			CFrame = CFrame.new(plotCenter + off + Vector3.new(0, 0.25, -5.4)) * CFrame.Angles(0, 0, math.rad(90)),
+			Color = Color3.fromRGB(45, 235, 65),
+			Material = Enum.Material.Neon,
+			CanCollide = false,
+			Parent = model,
+		})
+
+		local collectBg = Instance.new("BillboardGui")
+		collectBg.Size = UDim2.fromOffset(150, 42)
+		collectBg.StudsOffset = Vector3.new(0, 2.6, 0)
+		collectBg.AlwaysOnTop = true
+		collectBg.MaxDistance = 90
+		collectBg.Parent = collectBtn
+
+		local collectLbl = Instance.new("TextLabel")
+		collectLbl.Size = UDim2.fromScale(1, 1)
+		collectLbl.BackgroundTransparency = 1
+		collectLbl.Font = Enum.Font.FredokaOne
+		collectLbl.TextColor3 = Color3.fromRGB(75, 255, 85)
+		collectLbl.TextStrokeTransparency = 0
+		collectLbl.TextScaled = true
+		collectLbl.Text = ""
+		collectLbl.Parent = collectBg
+
+		local bg = Instance.new("BillboardGui")
+		bg.Size = UDim2.fromOffset(195, 76)
+		bg.StudsOffset = Vector3.new(0, 6.2, 0)
+		bg.AlwaysOnTop = true
+		bg.MaxDistance = 110
+		bg.Parent = pad
+
+		local titleLbl = Instance.new("TextLabel")
+		titleLbl.Size = UDim2.new(1, 0, 0.58, 0)
+		titleLbl.BackgroundTransparency = 1
+		titleLbl.Font = Enum.Font.FredokaOne
+		titleLbl.TextColor3 = Color3.new(1, 1, 1)
+		titleLbl.TextStrokeTransparency = 0
+		titleLbl.TextScaled = true
+		titleLbl.Text = "Emplacement Libre"
+		titleLbl.Parent = bg
+
+		local subLbl = Instance.new("TextLabel")
+		subLbl.Size = UDim2.new(1, 0, 0.42, 0)
+		subLbl.Position = UDim2.fromScale(0, 0.58)
+		subLbl.BackgroundTransparency = 1
+		subLbl.Font = Enum.Font.GothamBold
+		subLbl.TextColor3 = Color3.fromRGB(235, 255, 235)
+		subLbl.TextStrokeTransparency = 0
+		subLbl.TextScaled = true
+		subLbl.Text = "Rentre avec une Pierre !"
+		subLbl.Parent = bg
+
+		local primaryPrompt = Instance.new("ProximityPrompt")
+		primaryPrompt.ObjectText = "Emplacement #" .. i
+		primaryPrompt.ActionText = "Interagir"
+		primaryPrompt.HoldDuration = 0
+		primaryPrompt.MaxActivationDistance = 11
+		primaryPrompt.RequiresLineOfSight = false
+		primaryPrompt.Parent = pad
+
+		local slot: BaseSlot = {
+			SlotIndex = i,
+			State = "Empty",
+			StoneId = nil,
+			EndTime = nil,
+			SwordItem = nil,
+			AccumulatedMoney = 0,
+			PadPart = pad,
+			CollectButtonPart = collectBtn,
+			CollectLabel = collectLbl,
+			TitleLabel = titleLbl,
+			SubLabel = subLbl,
+			PrimaryPrompt = primaryPrompt,
+			VisualModel = nil,
+		}
+
+		-- Marcher sur le bouton vert devant l'épée récolte tout l'argent accumulé !
+		collectBtn.Touched:Connect(function(hit: BasePart)
+			local char = hit.Parent
+			local plr = if char then Players:GetPlayerFromCharacter(char) else nil
+			if not plr then
+				return
+			end
+			local sess = PlayerSessions[plr]
+			if sess and sess.BaseIndex == baseIndex then
+				collectSlotMoney(sess, slot)
+			end
+		end)
+
+		primaryPrompt.Triggered:Connect(function(plr: Player)
+			local sess = PlayerSessions[plr]
+			if not sess or sess.BaseIndex ~= baseIndex then
+				return
+			end
+			if slot.State == "Empty" then
+				if sess.CarryingStoneId then
+					placeCarriedStoneOnSlot(sess, slot)
+				else
+					-- S'il a une épée non posée dans son inventaire, la poser ici !
+					local placedUids = getPlacedSwordUids(sess)
+					for _, item in ipairs(sess.Inventory) do
+						if not placedUids[item.Uid] then
+							placeSwordItemOnSlot(sess, slot, item)
+							NotificationEvent:FireClient(plr, "⚔️ " .. item.Name .. " posée sur l'emplacement !", Color3.fromRGB(85, 255, 130))
+							return
+						end
+					end
+					NotificationEvent:FireClient(plr, "Va chercher une Pierre d'Épée dans les Zones !", Color3.fromRGB(255, 200, 75))
+				end
+			elseif slot.State == "Ready" then
+				hatchStoneOnSlot(sess, slot)
+			elseif slot.State == "Sword" and slot.SwordItem then
+				-- Récupérer l'argent restant puis ranger l'épée dans l'inventaire (pour la revendre ou libérer la place) !
+				collectSlotMoney(sess, slot)
+				local itemName = slot.SwordItem.Name
+				slot.State = "Empty"
+				slot.SwordItem = nil
+				if slot.VisualModel then
+					slot.VisualModel:Destroy()
+					slot.VisualModel = nil
+				end
+				refreshSlotVisuals(sess, slot)
+				syncPlayerState(sess)
+				NotificationEvent:FireClient(
+					plr,
+					"🎒 " .. itemName .. " récupérée dans ton inventaire ! Tu peux la revendre au Marchand ou la reposer.",
+					Color3.fromRGB(255, 215, 75)
+				)
+			end
+		end)
+
+		table.insert(slots, slot)
+	end
+
+	local signAnchor = createPart({
+		Name = "OwnerBadgeAnchor",
+		Size = Vector3.new(1, 1, 1),
+		CFrame = CFrame.new(plotCenter + Vector3.new(0, 11, -19)),
+		Transparency = 1,
+		CanCollide = false,
+		Parent = model,
+	})
+	local ownerBg = Instance.new("BillboardGui")
+	ownerBg.Size = UDim2.fromOffset(140, 90)
+	ownerBg.AlwaysOnTop = true
+	ownerBg.MaxDistance = 200
+	ownerBg.Parent = signAnchor
+
+	local avatarCircle = Instance.new("ImageLabel")
+	avatarCircle.Size = UDim2.fromOffset(54, 54)
+	avatarCircle.Position = UDim2.new(0.5, -27, 0, 0)
+	avatarCircle.BackgroundColor3 = Color3.fromRGB(30, 35, 45)
+	avatarCircle.Parent = ownerBg
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(1, 0)
+	c.Parent = avatarCircle
+	local s = Instance.new("UIStroke")
+	s.Color = Color3.fromRGB(20, 20, 20)
+	s.Thickness = 3
+	s.Parent = avatarCircle
+
+	local ownerNameLbl = Instance.new("TextLabel")
+	ownerNameLbl.Size = UDim2.new(1, 0, 0, 28)
+	ownerNameLbl.Position = UDim2.fromOffset(0, 56)
+	ownerNameLbl.BackgroundTransparency = 1
+	ownerNameLbl.Font = Enum.Font.FredokaOne
+	ownerNameLbl.TextColor3 = Color3.new(1, 1, 1)
+	ownerNameLbl.TextStrokeTransparency = 0
+	ownerNameLbl.TextScaled = true
+	ownerNameLbl.Text = "Base Libre"
+	ownerNameLbl.Parent = ownerBg
+
+	local spawnCF = CFrame.new(plotCenter + Vector3.new(0, 4, -21), plotCenter + Vector3.new(0, 4, -65))
+	return model, spawnCF, slots, ownerNameLbl, avatarCircle
+end
+
+local BaseSlotsData = {}
+local plotCoords = {
+	Vector3.new(-74, 0, 95),
+	Vector3.new(74, 0, 95),
+	Vector3.new(-74, 0, 152),
+	Vector3.new(74, 0, 152),
+}
+for i, coord in ipairs(plotCoords) do
+	local model, spawnCF, slots, ownerNameLbl, avatarCircle = buildSimplePlayerBase(i, coord, FENCE_COLORS[i])
+	BaseSlotsData[i] = {
+		Center = coord,
+		Model = model,
+		SpawnCFrame = spawnCF,
+		Slots = slots,
+		OwnerNameLabel = ownerNameLbl,
+		AvatarImage = avatarCircle,
+	}
+end
+
+-- ============================================================================
+-- LA GRANDE ALLÉE DES 10 ZONES + DÉCORATIONS + RAMASSAGE PAR CLIC OU TOUCHE E UNIQUEMENT
+-- ============================================================================
+
+type ActiveStoneSpawn = {
+	Tier: GameConfig.StoneTier,
+	SpawnPos: Vector3,
+	CurrentModel: Model?,
+	RespawnAt: number?,
+}
+
+type ActiveGuardian = {
+	Tier: GameConfig.StoneTier,
+	Model: Model,
+	ZoneZMin: number,
+	ZoneZMax: number,
+	CornerRestPos: Vector3,
+	AnimTime: number,
+	StatusLabel: TextLabel?,
+}
+
+local StoneSpawns: { ActiveStoneSpawn } = {}
+local Guardians: { ActiveGuardian } = {}
+
+local function tryGrabStone(plr: Player, slot: ActiveStoneSpawn)
+	if not slot.CurrentModel then
+		return
+	end
+	local sess = PlayerSessions[plr]
+	if not sess then
+		return
+	end
+	if sess.CarryingStoneId then
+		NotificationEvent:FireClient(plr, "Tu portes déjà une Pierre d'Épée ! Ramène-la dans ta Base !", Color3.fromRGB(255, 160, 55))
+		return
+	end
+
+	slot.CurrentModel:Destroy()
+	slot.CurrentModel = nil
+	slot.RespawnAt = os.clock() + 8
+
+	giveCarriedStone(sess, slot.Tier)
+	NotificationEvent:FireClient(
+		plr,
+		string.format("⚠️ %s attrapée ! Le %s se réveille, cours à ta Base !", slot.Tier.Name, slot.Tier.GuardianName),
+		slot.Tier.CrystalColor
+	)
+end
+
+local function spawnSwordStoneAt(slot: ActiveStoneSpawn)
+	if slot.CurrentModel then
+		slot.CurrentModel:Destroy()
+		slot.CurrentModel = nil
+	end
+
+	local model = ModelBuilder.CreateSwordStoneModel(slot.Tier, CFrame.new(slot.SpawnPos), false)
+	model.Parent = MapFolder
+	slot.CurrentModel = model
+
+	local root = model.PrimaryPart
+	if not root then
+		return
+	end
+
+	local bg = Instance.new("BillboardGui")
+	bg.Size = UDim2.fromOffset(240, 62)
+	bg.StudsOffset = Vector3.new(0, 5.5, 0)
+	bg.AlwaysOnTop = true
+	bg.MaxDistance = 150
+	bg.Parent = root
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.fromScale(1, 1)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.FredokaOne
+	lbl.TextColor3 = slot.Tier.CrystalColor
+	lbl.TextStrokeTransparency = 0
+	lbl.TextScaled = true
+	lbl.Text = string.format(
+		"%s ($%s-$%s/s)\n[E ou Clic] Voler (%s)",
+		slot.Tier.Name,
+		GameConfig.FormatNumber(slot.Tier.MinBaseMoneyPerSec),
+		GameConfig.FormatNumber(slot.Tier.MaxBaseMoneyPerSec * 3),
+		GameConfig.FormatTime(slot.Tier.ForgeTime)
+	)
+	lbl.Parent = bg
+
+	-- Ramassage UNIQUEMENT par Touche E ou Clic souris (plus de ramassage involontaire en marchant dessus !)
+	local prompt = Instance.new("ProximityPrompt")
+	prompt.ObjectText = slot.Tier.Name
+	prompt.ActionText = "Voler la Pierre"
+	prompt.HoldDuration = 0
+	prompt.MaxActivationDistance = 16
+	prompt.RequiresLineOfSight = false
+	prompt.Parent = root
+
+	prompt.Triggered:Connect(function(plr: Player)
+		tryGrabStone(plr, slot)
+	end)
+
+	local click = Instance.new("ClickDetector")
+	click.MaxActivationDistance = 22
+	click.Parent = root
+	click.MouseClick:Connect(function(plr: Player)
+		tryGrabStone(plr, slot)
+	end)
+end
+
+local currentZMax = RUNWAY_START_Z
+
+for idx, tier in ipairs(GameConfig.StoneTiers) do
+	local zLength = tier.ZoneLength
+	local zMax = currentZMax
+	local zMin = zMax - zLength
+	local zCenter = (zMax + zMin) / 2
+	currentZMax = zMin
+
+	local zoneCenter = Vector3.new(0, 0, zCenter)
+
+	local zoneFloor = createPart({
+		Name = "ZoneFloor_" .. idx,
+		Size = Vector3.new(CORRIDOR_WIDTH, 4, zLength),
+		CFrame = CFrame.new(0, -2, zCenter),
+		Parent = MapFolder,
+	})
+	ModelBuilder.ApplyFloorVisuals(zoneFloor, tier.FloorColor, Enum.Material.Plastic)
+
+	createStyledWall(
+		MapFolder,
+		CFrame.new(-CORRIDOR_WIDTH / 2 - 4, 14, zCenter),
+		Vector3.new(8, 28, zLength),
+		tier.WallColor
+	)
+	createStyledWall(
+		MapFolder,
+		CFrame.new(CORRIDOR_WIDTH / 2 + 4, 14, zCenter),
+		Vector3.new(8, 28, zLength),
+		tier.WallColor
+	)
+
+	-- Décorations thématiques de la Zone (Cactus dans le désert, arbres, cristaux, etc.)
+	ModelBuilder.CreateZoneDecorations(MapFolder, idx, zoneCenter, zLength, CORRIDOR_WIDTH)
+
+	local gateBar = createPart({
+		Name = "ZoneDivider_" .. idx,
+		Size = Vector3.new(CORRIDOR_WIDTH, 0.5, 3.0),
+		CFrame = CFrame.new(0, 0.1, zMax),
+		Color = tier.CrystalColor,
+		Material = Enum.Material.Neon,
+		TopSurface = Enum.SurfaceType.Smooth,
+		Parent = MapFolder,
+	})
+
+	local zoneBg = Instance.new("BillboardGui")
+	zoneBg.Size = UDim2.fromOffset(390, 74)
+	zoneBg.StudsOffset = Vector3.new(0, 18, 0)
+	zoneBg.AlwaysOnTop = true
+	zoneBg.MaxDistance = 300
+	zoneBg.Parent = gateBar
+
+	local zoneLbl = Instance.new("TextLabel")
+	zoneLbl.Size = UDim2.fromScale(1, 1)
+	zoneLbl.BackgroundTransparency = 1
+	zoneLbl.Font = Enum.Font.FredokaOne
+	zoneLbl.TextColor3 = tier.CrystalColor
+	zoneLbl.TextStrokeTransparency = 0
+	zoneLbl.TextScaled = true
+	zoneLbl.Text = string.format(
+		"%s\n👟 Vitesse Garde : %s   |   ⏳ Éclosion : %s",
+		tier.ZoneName,
+		GameConfig.FormatNumber(tier.GuardianSpeedStat),
+		GameConfig.FormatTime(tier.ForgeTime)
+	)
+	zoneLbl.Parent = zoneBg
+
+	local zQuarter = zLength * 0.28
+	local stoneOffsets = {
+		Vector3.new(-30, 0.5, zQuarter),
+		Vector3.new(30, 0.5, zQuarter),
+		Vector3.new(0, 0.5, 0),
+		Vector3.new(-30, 0.5, -zQuarter),
+		Vector3.new(30, 0.5, -zQuarter),
+		Vector3.new(0, 0.5, -zQuarter * 1.3),
+	}
+	for _, off in ipairs(stoneOffsets) do
+		local entry: ActiveStoneSpawn = {
+			Tier = tier,
+			SpawnPos = zoneCenter + off,
+			CurrentModel = nil,
+			RespawnAt = nil,
+		}
+		table.insert(StoneSpawns, entry)
+		spawnSwordStoneAt(entry)
+	end
+
+	local cornerX = if idx % 2 == 1 then (-CORRIDOR_WIDTH / 2 + 16) else (CORRIDOR_WIDTH / 2 - 16)
+	local cornerRestPos = Vector3.new(cornerX, 0, zMin + 16)
+
+	local gModel = ModelBuilder.CreateGuardianModel(tier, cornerRestPos)
+	gModel.Parent = MapFolder
+	local head = gModel:FindFirstChild("Head")
+	local tag = if head then head:FindFirstChild("GuardianTag") else nil
+	local statusLbl = if tag then tag:FindFirstChild("Status") :: TextLabel? else nil
+
+	table.insert(Guardians, {
+		Tier = tier,
+		Model = gModel,
+		ZoneZMin = zMin + 4,
+		ZoneZMax = zMax - 4,
+		CornerRestPos = cornerRestPos,
+		AnimTime = 0,
+		StatusLabel = statusLbl,
+	})
+end
+
+createStyledWall(
+	MapFolder,
+	CFrame.new(0, 16, currentZMax),
+	Vector3.new(CORRIDOR_WIDTH + 16, 32, 8),
+	Color3.fromRGB(255, 215, 65)
+)
+
+-- ============================================================================
+-- CONNEXION DES JOUEURS & ACTIONS
+-- ============================================================================
+
+local function onPlayerAdded(player: Player)
+	local chosenIndex = 1
+	for i = 1, 4 do
+		if not AssignedBases[i] then
+			chosenIndex = i
+			AssignedBases[i] = player
+			break
+		end
+	end
+
+	local baseSlot = BaseSlotsData[chosenIndex]
+	baseSlot.OwnerNameLabel.Text = player.DisplayName
+	task.spawn(function()
+		local ok, content = pcall(function()
+			return Players:GetUserThumbnailAsync(player.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+		end)
+		if ok and content then
+			baseSlot.AvatarImage.Image = content
+		end
+	end)
+
+	local leaderstats = Instance.new("Folder")
+	leaderstats.Name = "leaderstats"
+	leaderstats.Parent = player
+
+	local mpsVal = Instance.new("StringValue")
+	mpsVal.Name = "Money/s"
+	mpsVal.Value = "0"
+	mpsVal.Parent = leaderstats
+
+	local spdVal = Instance.new("StringValue")
+	spdVal.Name = "Vitesse"
+	spdVal.Value = "18"
+	spdVal.Parent = leaderstats
+
+	local session: PlayerSession = {
+		Player = player,
+		Money = 60,
+		TrainedSpeed = 0,
+		SlowMode = false,
+		SpeedBoostUntil = 0,
+		MoneyBoostUntil = 0,
+		CarryingStoneId = nil,
+		CarriedModel = nil,
+		OwnedTrails = {},
+		EquippedTrailId = nil,
+		Inventory = {},
+		Discovered = {},
+		Upgrades = {
+			SpeedLevel = 1,
+			CarryStrength = 1,
+			ForgeSpeed = 1,
+			SlotCount = 4,
+		},
+		BaseIndex = chosenIndex,
+		BaseCenter = baseSlot.Center,
+		BaseModel = baseSlot.Model,
+		SpawnCFrame = baseSlot.SpawnCFrame,
+		Slots = baseSlot.Slots,
+		Treadmill = nil,
+		NextSwordUidCounter = 0,
+	}
+	PlayerSessions[player] = session
+
+	refreshAllBaseSlots(session)
+
+	local defaultTreadmillPos = baseSlot.Center + Vector3.new(if baseSlot.Center.X < 0 then 36 else -36, 0, 0)
+	spawnOrMovePersonalTreadmill(session, defaultTreadmillPos, false)
+
+	player.CharacterAdded:Connect(function(char: Model)
+		task.wait(0.15)
+		local hrp = char:WaitForChild("HumanoidRootPart", 5) :: BasePart?
+		if hrp then
+			hrp.CFrame = session.SpawnCFrame
+		end
+		session.CarryingStoneId = nil
+		session.CarriedModel = nil
+		applyTrailOnCharacter(session)
+		giveTreadmillSpawnerTool(player)
+		applyCharacterWalkSpeed(session)
+		syncPlayerState(session)
+	end)
+
+	if player.Character then
+		local hrp = player.Character:FindFirstChild("HumanoidRootPart") :: BasePart?
+		if hrp then
+			hrp.CFrame = session.SpawnCFrame
+		end
+		applyTrailOnCharacter(session)
+		giveTreadmillSpawnerTool(player)
+		applyCharacterWalkSpeed(session)
+	end
+
+	task.delay(0.5, function()
+		syncPlayerState(session)
+	end)
+end
+
+local function onPlayerRemoving(player: Player)
+	local sess = PlayerSessions[player]
+	if sess then
+		AssignedBases[sess.BaseIndex] = nil
+		local baseSlot = BaseSlotsData[sess.BaseIndex]
+		if baseSlot then
+			baseSlot.OwnerNameLabel.Text = "Base Libre"
+			baseSlot.AvatarImage.Image = ""
+		end
+		if sess.Treadmill and sess.Treadmill.Model then
+			sess.Treadmill.Model:Destroy()
+			sess.Treadmill = nil
+		end
+		for _, slot in ipairs(sess.Slots) do
+			slot.State = "Empty"
+			slot.StoneId = nil
+			slot.EndTime = nil
+			slot.SwordItem = nil
+			slot.AccumulatedMoney = 0
+			if slot.VisualModel then
+				slot.VisualModel:Destroy()
+				slot.VisualModel = nil
+			end
+		end
+		PlayerSessions[player] = nil
+	end
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+Players.PlayerRemoving:Connect(onPlayerRemoving)
+for _, plr in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, plr)
+end
+
+ActionEvent.OnServerEvent:Connect(function(player: Player, actionType: string, payload: any)
+	local sess = PlayerSessions[player]
+	if not sess then
+		return
+	end
+
+	if actionType == "ToggleSlowMode" then
+		sess.SlowMode = not sess.SlowMode
+		applyCharacterWalkSpeed(sess)
+		syncPlayerState(sess)
+
+	elseif actionType == "SpawnTreadmill" then
+		local char = player.Character
+		local hrp = if char then char:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+		if hrp then
+			local targetPos = hrp.Position + hrp.CFrame.LookVector * 12
+			spawnOrMovePersonalTreadmill(sess, targetPos, true)
+		end
+
+	elseif actionType == "BuyUpgrade" and typeof(payload) == "string" then
+		local upgConfig = GameConfig.Upgrades[payload]
+		local currentLvl = (sess.Upgrades :: any)[payload]
+		if not upgConfig or not currentLvl or currentLvl >= upgConfig.MaxLevel then
+			return
+		end
+		local cost = GameConfig.GetUpgradeCost(payload, currentLvl)
+		if sess.Money < cost then
+			NotificationEvent:FireClient(player, "Il te manque $" .. GameConfig.FormatNumber(cost - sess.Money) .. " !", Color3.fromRGB(255, 90, 90))
+			return
+		end
+		sess.Money -= cost
+		;(sess.Upgrades :: any)[payload] = currentLvl + 1
+		if payload == "SlotCount" then
+			refreshAllBaseSlots(sess)
+		elseif payload == "SpeedLevel" then
+			updateTreadmillLabels(sess)
+		end
+		applyCharacterWalkSpeed(sess)
+		syncPlayerState(sess)
+		NotificationEvent:FireClient(player, "✨ " .. upgConfig.Name .. " Niveau " .. (currentLvl + 1) .. " !", Color3.fromRGB(85, 255, 125))
+
+	elseif actionType == "TogglePlaceSword" and typeof(payload) == "string" then
+		-- Permet depuis l'inventaire de poser une épée sur sa base ou de la retirer dans son sac !
+		for _, slot in ipairs(sess.Slots) do
+			if slot.State == "Sword" and slot.SwordItem and slot.SwordItem.Uid == payload then
+				collectSlotMoney(sess, slot)
+				slot.State = "Empty"
+				slot.SwordItem = nil
+				if slot.VisualModel then
+					slot.VisualModel:Destroy()
+					slot.VisualModel = nil
+				end
+				refreshSlotVisuals(sess, slot)
+				syncPlayerState(sess)
+				NotificationEvent:FireClient(player, "🎒 Épée rangée dans ton inventaire !", Color3.fromRGB(255, 210, 75))
+				return
+			end
+		end
+
+		for _, item in ipairs(sess.Inventory) do
+			if item.Uid == payload then
+				for _, slot in ipairs(sess.Slots) do
+					if slot.SlotIndex <= sess.Upgrades.SlotCount and slot.State == "Empty" then
+						placeSwordItemOnSlot(sess, slot, item)
+						NotificationEvent:FireClient(player, "⚔️ " .. item.Name .. " posée dans ta Base !", Color3.fromRGB(85, 255, 125))
+						return
+					end
+				end
+				NotificationEvent:FireClient(player, "Tous les emplacements de ta Base sont occupés !", Color3.fromRGB(255, 110, 80))
+				return
+			end
+		end
+
+	elseif actionType == "SellSword" and typeof(payload) == "string" then
+		for idx, item in ipairs(sess.Inventory) do
+			if item.Uid == payload then
+				for _, slot in ipairs(sess.Slots) do
+					if slot.State == "Sword" and slot.SwordItem and slot.SwordItem.Uid == payload then
+						collectSlotMoney(sess, slot)
+						slot.State = "Empty"
+						slot.SwordItem = nil
+						if slot.VisualModel then
+							slot.VisualModel:Destroy()
+							slot.VisualModel = nil
+						end
+						refreshSlotVisuals(sess, slot)
+					end
+				end
+				sess.Money += item.SellPrice
+				table.remove(sess.Inventory, idx)
+				syncPlayerState(sess)
+				NotificationEvent:FireClient(
+					player,
+					string.format("💰 %s vendue pour +$%s !", item.Name, GameConfig.FormatNumber(item.SellPrice)),
+					Color3.fromRGB(85, 255, 110)
+				)
+				break
+			end
+		end
+
+	elseif actionType == "BuyOrEquipTrail" and typeof(payload) == "string" then
+		local foundTrail: GameConfig.TrailInfo? = nil
+		for _, t in ipairs(GameConfig.Trails) do
+			if t.Id == payload then
+				foundTrail = t
+				break
+			end
+		end
+		if not foundTrail then
+			return
+		end
+
+		if sess.OwnedTrails[foundTrail.Id] then
+			sess.EquippedTrailId = foundTrail.Id
+			applyTrailOnCharacter(sess)
+			applyCharacterWalkSpeed(sess)
+			syncPlayerState(sess)
+			NotificationEvent:FireClient(player, "✨ Traînée équipée : " .. foundTrail.Name, foundTrail.Color1)
+		else
+			if sess.Money < foundTrail.Price then
+				NotificationEvent:FireClient(
+					player,
+					"Pas assez d'Argent ! Il faut $" .. GameConfig.FormatNumber(foundTrail.Price),
+					Color3.fromRGB(255, 90, 90)
+				)
+				return
+			end
+			sess.Money -= foundTrail.Price
+			sess.OwnedTrails[foundTrail.Id] = true
+			sess.EquippedTrailId = foundTrail.Id
+			applyTrailOnCharacter(sess)
+			applyCharacterWalkSpeed(sess)
+			syncPlayerState(sess)
+			NotificationEvent:FireClient(
+				player,
+				string.format("✨ %s achetée et équipée (x%.2f Vitesse & x%.2f Argent) !", foundTrail.Name, foundTrail.SpeedMultiplier, foundTrail.MoneyMultiplier),
+				foundTrail.Color1
+			)
+		end
+
+	elseif actionType == "ActivatePotion" and typeof(payload) == "string" then
+		local cost = 500
+		if sess.Money < cost then
+			NotificationEvent:FireClient(player, "Il faut $500 pour activer une Potion Boost (3 min) !", Color3.fromRGB(255, 95, 95))
+			return
+		end
+		sess.Money -= cost
+		local now = os.clock()
+		if payload == "Speed" then
+			sess.SpeedBoostUntil = math.max(now, sess.SpeedBoostUntil) + 180
+			applyCharacterWalkSpeed(sess)
+			NotificationEvent:FireClient(player, "🧪 Potion x2 Vitesse activée (3 min) !", Color3.fromRGB(85, 225, 255))
+		else
+			sess.MoneyBoostUntil = math.max(now, sess.MoneyBoostUntil) + 180
+			NotificationEvent:FireClient(player, "🧪 Potion x2 Argent activée (3 min) !", Color3.fromRGB(95, 255, 120))
+		end
+		syncPlayerState(sess)
+	end
+end)
+
+-- Boucle 1 seconde :
+-- - L'argent s'accumule sur chaque épée de la base (et se récolte en passant sur le bouton vert devant l'épée !)
+-- - Le Tapis de Course donne de la vitesse simplement en restant dessus (sans besoin de bouger !)
+task.spawn(function()
+	while true do
+		task.wait(1)
+		local now = os.clock()
+		if now >= NightEventCycleEnd then
+			NightEventCycleEnd = now + 240
+		end
+
+		for _, slot in ipairs(StoneSpawns) do
+			if not slot.CurrentModel and slot.RespawnAt and now >= slot.RespawnAt then
+				slot.RespawnAt = nil
+				spawnSwordStoneAt(slot)
+			end
+		end
+
+		for _, sess in pairs(PlayerSessions) do
+			local trailSpdMult, trailMoneyMult = getTrailMultipliers(sess)
+			local moneyMult = trailMoneyMult * (if now < sess.MoneyBoostUntil then 2 else 1)
+
+			-- Tapis de course : il suffit d'être dessus (même immobile) pour gagner de la vitesse !
+			if sess.Treadmill and sess.Treadmill.Belt then
+				local char = sess.Player.Character
+				local hrp = if char then char:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+				if hrp then
+					local diff = hrp.Position - sess.Treadmill.Belt.Position
+					if math.abs(diff.X) <= 5.5 and math.abs(diff.Z) <= 10.5 and math.abs(diff.Y) <= 6.5 then
+						local baseGain = GameConfig.GetTreadmillGainPerTick(sess.Upgrades.SpeedLevel)
+						local finalGain = math.floor(baseGain * trailSpdMult)
+						sess.TrainedSpeed += finalGain
+						applyCharacterWalkSpeed(sess)
+						PopupEvent:FireClient(sess.Player, "Speed", "+" .. GameConfig.FormatNumber(finalGain))
+					end
+				end
+			end
+
+			-- Mise à jour des emplacements de la base (Éclosion + Accumulation d'argent sur chaque épée)
+			for _, slot in ipairs(sess.Slots) do
+				if slot.State == "Forging" and slot.EndTime then
+					local rem = math.ceil(slot.EndTime - now)
+					if rem > 0 then
+						slot.SubLabel.Text = "⏳ " .. GameConfig.FormatTime(rem)
+					else
+						slot.State = "Ready"
+						refreshSlotVisuals(sess, slot)
+					end
+				elseif slot.State == "Sword" and slot.SwordItem then
+					slot.AccumulatedMoney += math.floor(slot.SwordItem.MoneyPerSec * moneyMult)
+					slot.CollectLabel.Text = "💵 $" .. GameConfig.FormatNumber(slot.AccumulatedMoney)
+				end
+			end
+
+			syncPlayerState(sess)
+		end
+	end
+end)
+
+-- Boucle 60 FPS : Gardes AFK dans leur coin qui ne bougent QUE lorsqu'un joueur vole une Pierre d'Épée
+RunService.Heartbeat:Connect(function(dt: number)
+	for _, g in ipairs(Guardians) do
+		local root = g.Model.PrimaryPart
+		if not root then
+			continue
+		end
+
+		g.AnimTime += dt
+
+		local targetSession: PlayerSession? = nil
+		local targetPos: Vector3? = nil
+		local bestDist = 9999
+
+		for _, sess in pairs(PlayerSessions) do
+			if sess.CarryingStoneId ~= nil then
+				local char = sess.Player.Character
+				local hrp = if char then char:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+				if hrp then
+					local pPos = hrp.Position
+					if pPos.Z <= g.ZoneZMax + 6 and pPos.Z >= g.ZoneZMin - 6 and math.abs(pPos.X) <= CORRIDOR_WIDTH / 2 then
+						local d = (pPos - root.Position).Magnitude
+						if d < bestDist then
+							bestDist = d
+							targetSession = sess
+							targetPos = pPos
+						end
+					end
+				end
+			end
+		end
+
+		local currentPos = root.Position
+		local nextPos: Vector3
+		local lookTarget: Vector3
+		local isMoving = false
+
+		if targetSession and targetPos then
+			isMoving = true
+			if g.StatusLabel then
+				g.StatusLabel.Text = "😡 POURSUITE : " .. targetSession.Player.DisplayName .. " !"
+				g.StatusLabel.TextColor3 = Color3.fromRGB(255, 65, 65)
+			end
+
+			local playerChar = targetSession.Player.Character
+			local playerHum = if playerChar then playerChar:FindFirstChildOfClass("Humanoid") else nil
+			local playerWalkSpeed = if playerHum then playerHum.WalkSpeed else 16
+			local playerStatSpeed = math.max(1, getPlayerTotalSpeed(targetSession))
+			local guardStatSpeed = g.Tier.GuardianSpeedStat
+
+			local speedRatio = math.clamp(guardStatSpeed / playerStatSpeed, 0.55, 1.65)
+			local guardPhysicalSpeed = math.clamp(playerWalkSpeed * speedRatio * 1.15, 18, 195)
+
+			local dir = Vector3.new(targetPos.X - currentPos.X, 0, targetPos.Z - currentPos.Z)
+			if dir.Magnitude > 0.1 then
+				nextPos = currentPos + dir.Unit * guardPhysicalSpeed * dt
+				lookTarget = Vector3.new(targetPos.X, currentPos.Y, targetPos.Z)
+			else
+				nextPos = currentPos
+				lookTarget = currentPos + Vector3.new(0, 0, 1)
+			end
+
+			if bestDist < 6.5 then
+				clearCarriedStone(targetSession)
+				NotificationEvent:FireClient(
+					targetSession.Player,
+					string.format(
+						"💥 Rattrapé par %s (Vit: %s) !",
+						g.Tier.GuardianName,
+						GameConfig.FormatNumber(g.Tier.GuardianSpeedStat)
+					),
+					Color3.fromRGB(255, 75, 75)
+				)
+				local hrp = if playerChar then playerChar:FindFirstChild("HumanoidRootPart") :: BasePart? else nil
+				if hrp then
+					hrp.CFrame = targetSession.SpawnCFrame
+				end
+			end
+		else
+			local cornerTarget = Vector3.new(g.CornerRestPos.X, currentPos.Y, g.CornerRestPos.Z)
+			local toCorner = Vector3.new(cornerTarget.X - currentPos.X, 0, cornerTarget.Z - currentPos.Z)
+			if toCorner.Magnitude > 1.2 then
+				isMoving = true
+				if g.StatusLabel then
+					g.StatusLabel.Text = "🚶 Retourne dans son coin..."
+					g.StatusLabel.TextColor3 = Color3.fromRGB(215, 225, 240)
+				end
+				nextPos = currentPos + toCorner.Unit * math.min(toCorner.Magnitude, 36 * dt)
+				lookTarget = Vector3.new(cornerTarget.X, currentPos.Y, cornerTarget.Z)
+			else
+				isMoving = false
+				if g.StatusLabel then
+					g.StatusLabel.Text = "💤 AFK (Immobile)"
+					g.StatusLabel.TextColor3 = Color3.fromRGB(190, 225, 255)
+				end
+				nextPos = cornerTarget
+				lookTarget = Vector3.new(0, currentPos.Y, g.CornerRestPos.Z + 20)
+			end
+		end
+
+		local rootCF = CFrame.lookAt(nextPos, lookTarget)
+		ModelBuilder.PositionAndAnimateGuardian(g.Model, g.Tier.GuardianScale, rootCF, g.AnimTime, isMoving)
+	end
+end)
+]]></string>
+      </Properties>
+    </Item>
+  </Item>
+  <Item class="StarterPlayer" referent="7">
+    <Properties>
+      <string name="Name">StarterPlayer</string>
+    </Properties>
+    <Item class="StarterPlayerScripts" referent="8">
+      <Properties>
+        <string name="Name">StarterPlayerScripts</string>
+      </Properties>
+      <Item class="LocalScript" referent="9">
+        <Properties>
+          <string name="Name">Client</string>
+          <string name="Source"><![CDATA[--!strict
+-- Interface Client de "Voler une Épée" :
+-- - Gain hors ligne fortement réduit et réaliste
+-- - Gestion des épées posées dans la base vs dans l'inventaire + Revente au Marchand
+-- - Popups verts "+$..." quand on marche sur le bouton de récolte devant une épée
+
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local Shared = ReplicatedStorage:WaitForChild("Shared")
+local GameConfig = require(Shared:WaitForChild("GameConfig"))
+
+local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+local StateUpdateEvent = Remotes:WaitForChild("StateUpdate") :: RemoteEvent
+local NotificationEvent = Remotes:WaitForChild("Notification") :: RemoteEvent
+local SwordRevealEvent = Remotes:WaitForChild("SwordReveal") :: RemoteEvent
+local ActionEvent = Remotes:WaitForChild("PlayerAction") :: RemoteEvent
+local PopupEvent = Remotes:WaitForChild("FloatingPopup") :: RemoteEvent
+local OpenMerchantEvent = Remotes:WaitForChild("OpenMerchant") :: RemoteEvent
+
+local currentState = {
+	Money = 60,
+	MoneyPerSec = 0,
+	TotalSpeed = 18,
+	TreadmillLevel = 1,
+	TreadmillGain = 2,
+	SlowMode = false,
+	CarryingStoneId = nil :: string?,
+	PlacedSwordUids = {} :: { [string]: boolean },
+	OwnedTrails = {} :: { [string]: boolean },
+	EquippedTrailId = nil :: string?,
+	TrailSpeedMult = 1.0,
+	TrailMoneyMult = 1.0,
+	Inventory = {} :: { GameConfig.OwnedSwordItem },
+	Discovered = {} :: { [string]: boolean },
+	Upgrades = {
+		SpeedLevel = 1,
+		CarryStrength = 1,
+		ForgeSpeed = 1,
+		SlotCount = 4,
+	},
+	NightRemaining = 230,
+	PotionRemaining = 0,
+}
+
+local oldGui = playerGui:FindFirstChild("StealASwordHUD")
+if oldGui then
+	oldGui:Destroy()
+end
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "StealASwordHUD"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = true
+screenGui.Parent = playerGui
+
+local function addCorner(parent: Instance, radius: number)
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0, radius)
+	c.Parent = parent
+end
+
+local function addStroke(parent: Instance, color: Color3, thickness: number, strokeMode: Enum.ApplyStrokeMode?)
+	local s = Instance.new("UIStroke")
+	s.Color = color
+	s.Thickness = thickness
+	if strokeMode then
+		s.ApplyStrokeMode = strokeMode
+	end
+	s.Parent = parent
+	return s
+end
+
+-- ============================================================================
+-- 1. HAUT CENTRE : "Vous gagnez $.../jour hors ligne ! 😈" (FORTEMENT RÉDUIT)
+-- ============================================================================
+local offlineLabel = Instance.new("TextLabel")
+offlineLabel.Name = "OfflineEarningsBanner"
+offlineLabel.Size = UDim2.fromOffset(720, 48)
+offlineLabel.Position = UDim2.new(0.5, -360, 0, 14)
+offlineLabel.BackgroundTransparency = 1
+offlineLabel.Font = Enum.Font.FredokaOne
+offlineLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+offlineLabel.TextScaled = true
+offlineLabel.Text = "Vous gagnez $0/jour hors ligne ! 😈"
+offlineLabel.Parent = screenGui
+addStroke(offlineLabel, Color3.fromRGB(0, 0, 0), 3)
+
+-- ============================================================================
+-- 2. GAUCHE MILIEU : BOUTIQUE (!), INDICE, MODE LENT, ET POSER MON TAPIS
+-- ============================================================================
+local leftPanel = Instance.new("Frame")
+leftPanel.Size = UDim2.fromOffset(180, 260)
+leftPanel.Position = UDim2.new(0, 14, 0.5, -110)
+leftPanel.BackgroundTransparency = 1
+leftPanel.Parent = screenGui
+
+local shopBtn = Instance.new("TextButton")
+shopBtn.Name = "ShopButton"
+shopBtn.Size = UDim2.fromOffset(152, 54)
+shopBtn.Position = UDim2.fromOffset(0, 0)
+shopBtn.BackgroundColor3 = Color3.fromRGB(55, 235, 45)
+shopBtn.Font = Enum.Font.FredokaOne
+shopBtn.TextColor3 = Color3.new(1, 1, 1)
+shopBtn.TextSize = 25
+shopBtn.Text = "🛒Boutique"
+shopBtn.Parent = leftPanel
+addCorner(shopBtn, 10)
+addStroke(shopBtn, Color3.new(0, 0, 0), 3, Enum.ApplyStrokeMode.Border)
+addStroke(shopBtn, Color3.new(0, 0, 0), 2.5, Enum.ApplyStrokeMode.Contextual)
+
+local alertBadge = Instance.new("TextLabel")
+alertBadge.Size = UDim2.fromOffset(24, 24)
+alertBadge.Position = UDim2.new(1, -14, 0, -8)
+alertBadge.BackgroundColor3 = Color3.fromRGB(235, 35, 35)
+alertBadge.Font = Enum.Font.FredokaOne
+alertBadge.TextColor3 = Color3.new(1, 1, 1)
+alertBadge.TextSize = 18
+alertBadge.Text = "!"
+alertBadge.Parent = shopBtn
+addCorner(alertBadge, 12)
+addStroke(alertBadge, Color3.new(0, 0, 0), 2)
+
+local indexBtn = Instance.new("TextButton")
+indexBtn.Name = "IndexButton"
+indexBtn.Size = UDim2.fromOffset(152, 54)
+indexBtn.Position = UDim2.fromOffset(0, 64)
+indexBtn.BackgroundColor3 = Color3.fromRGB(45, 195, 255)
+indexBtn.Font = Enum.Font.FredokaOne
+indexBtn.TextColor3 = Color3.new(1, 1, 1)
+indexBtn.TextSize = 25
+indexBtn.Text = "📘 Indice"
+indexBtn.Parent = leftPanel
+addCorner(indexBtn, 10)
+addStroke(indexBtn, Color3.new(0, 0, 0), 3, Enum.ApplyStrokeMode.Border)
+addStroke(indexBtn, Color3.new(0, 0, 0), 2.5, Enum.ApplyStrokeMode.Contextual)
+
+local slowContainer = Instance.new("Frame")
+slowContainer.Size = UDim2.fromOffset(170, 34)
+slowContainer.Position = UDim2.fromOffset(0, 128)
+slowContainer.BackgroundTransparency = 1
+slowContainer.Parent = leftPanel
+
+local slowToggleBtn = Instance.new("TextButton")
+slowToggleBtn.Size = UDim2.fromOffset(78, 30)
+slowToggleBtn.Position = UDim2.fromOffset(0, 2)
+slowToggleBtn.BackgroundColor3 = Color3.fromRGB(25, 95, 25)
+slowToggleBtn.Text = ""
+slowToggleBtn.Parent = slowContainer
+addCorner(slowToggleBtn, 8)
+addStroke(slowToggleBtn, Color3.new(0, 0, 0), 2.5, Enum.ApplyStrokeMode.Border)
+
+local slowKnob = Instance.new("Frame")
+slowKnob.Size = UDim2.fromOffset(34, 24)
+slowKnob.Position = UDim2.fromOffset(3, 3)
+slowKnob.BackgroundColor3 = Color3.fromRGB(75, 240, 45)
+slowKnob.Parent = slowToggleBtn
+addCorner(slowKnob, 6)
+
+local slowLabel = Instance.new("TextLabel")
+slowLabel.Size = UDim2.fromOffset(88, 30)
+slowLabel.Position = UDim2.fromOffset(84, 2)
+slowLabel.BackgroundTransparency = 1
+slowLabel.Font = Enum.Font.FredokaOne
+slowLabel.TextColor3 = Color3.new(1, 1, 1)
+slowLabel.TextXAlignment = Enum.TextXAlignment.Left
+slowLabel.TextSize = 18
+slowLabel.Text = "Mode lent"
+slowLabel.Parent = slowContainer
+addStroke(slowLabel, Color3.new(0, 0, 0), 2)
+
+local spawnTreadmillBtn = Instance.new("TextButton")
+spawnTreadmillBtn.Name = "SpawnTreadmillButton"
+spawnTreadmillBtn.Size = UDim2.fromOffset(152, 46)
+spawnTreadmillBtn.Position = UDim2.fromOffset(0, 172)
+spawnTreadmillBtn.BackgroundColor3 = Color3.fromRGB(255, 110, 35)
+spawnTreadmillBtn.Font = Enum.Font.FredokaOne
+spawnTreadmillBtn.TextColor3 = Color3.new(1, 1, 1)
+spawnTreadmillBtn.TextScaled = true
+spawnTreadmillBtn.Text = "🏃 Poser Tapis [T]"
+spawnTreadmillBtn.Parent = leftPanel
+addCorner(spawnTreadmillBtn, 10)
+addStroke(spawnTreadmillBtn, Color3.new(0, 0, 0), 3, Enum.ApplyStrokeMode.Border)
+addStroke(spawnTreadmillBtn, Color3.new(0, 0, 0), 2, Enum.ApplyStrokeMode.Contextual)
+
+-- ============================================================================
+-- 3. BAS GAUCHE : 👟 VITESSE (ROSE VIF) ET 💵 $ARGENT (VERT VIF)
+-- ============================================================================
+local bottomLeft = Instance.new("Frame")
+bottomLeft.Size = UDim2.fromOffset(360, 115)
+bottomLeft.Position = UDim2.new(0, 14, 1, -125)
+bottomLeft.BackgroundTransparency = 1
+bottomLeft.Parent = screenGui
+
+local speedRow = Instance.new("Frame")
+speedRow.Size = UDim2.new(1, 0, 0, 52)
+speedRow.Position = UDim2.fromOffset(0, 0)
+speedRow.BackgroundTransparency = 1
+speedRow.Parent = bottomLeft
+
+local shoeIcon = Instance.new("TextLabel")
+shoeIcon.Size = UDim2.fromOffset(48, 48)
+shoeIcon.Position = UDim2.fromOffset(0, 2)
+shoeIcon.BackgroundTransparency = 1
+shoeIcon.Text = "👟"
+shoeIcon.TextScaled = true
+shoeIcon.Parent = speedRow
+
+local plusSpeedBtn = Instance.new("TextButton")
+plusSpeedBtn.Size = UDim2.fromOffset(22, 22)
+plusSpeedBtn.Position = UDim2.fromOffset(30, 28)
+plusSpeedBtn.BackgroundColor3 = Color3.fromRGB(255, 200, 35)
+plusSpeedBtn.Font = Enum.Font.FredokaOne
+plusSpeedBtn.TextColor3 = Color3.new(1, 1, 1)
+plusSpeedBtn.TextSize = 18
+plusSpeedBtn.Text = "+"
+plusSpeedBtn.Parent = speedRow
+addCorner(plusSpeedBtn, 5)
+addStroke(plusSpeedBtn, Color3.new(0, 0, 0), 2, Enum.ApplyStrokeMode.Border)
+
+local speedValueLabel = Instance.new("TextLabel")
+speedValueLabel.Size = UDim2.new(1, -62, 1, 0)
+speedValueLabel.Position = UDim2.fromOffset(60, 0)
+speedValueLabel.BackgroundTransparency = 1
+speedValueLabel.Font = Enum.Font.FredokaOne
+speedValueLabel.TextColor3 = Color3.fromRGB(255, 45, 225)
+speedValueLabel.TextXAlignment = Enum.TextXAlignment.Left
+speedValueLabel.TextScaled = true
+speedValueLabel.Text = "18"
+speedValueLabel.Parent = speedRow
+addStroke(speedValueLabel, Color3.new(0, 0, 0), 3)
+
+local moneyRow = Instance.new("Frame")
+moneyRow.Size = UDim2.new(1, 0, 0, 54)
+moneyRow.Position = UDim2.fromOffset(0, 56)
+moneyRow.BackgroundTransparency = 1
+moneyRow.Parent = bottomLeft
+
+local cashIcon = Instance.new("TextLabel")
+cashIcon.Size = UDim2.fromOffset(48, 48)
+cashIcon.Position = UDim2.fromOffset(0, 2)
+cashIcon.BackgroundTransparency = 1
+cashIcon.Text = "💵"
+cashIcon.TextScaled = true
+cashIcon.Parent = moneyRow
+
+local moneyValueLabel = Instance.new("TextLabel")
+moneyValueLabel.Size = UDim2.new(1, -62, 1, 0)
+moneyValueLabel.Position = UDim2.fromOffset(60, 0)
+moneyValueLabel.BackgroundTransparency = 1
+moneyValueLabel.Font = Enum.Font.FredokaOne
+moneyValueLabel.TextColor3 = Color3.fromRGB(65, 255, 55)
+moneyValueLabel.TextXAlignment = Enum.TextXAlignment.Left
+moneyValueLabel.TextScaled = true
+moneyValueLabel.Text = "$60"
+moneyValueLabel.Parent = moneyRow
+addStroke(moneyValueLabel, Color3.new(0, 0, 0), 3)
+
+-- ============================================================================
+-- 4. DROITE MILIEU : 3 BOUTONS CARRÉS
+-- ============================================================================
+local rightPanel = Instance.new("Frame")
+rightPanel.Size = UDim2.fromOffset(74, 240)
+rightPanel.Position = UDim2.new(1, -86, 0.5, -110)
+rightPanel.BackgroundTransparency = 1
+rightPanel.Parent = screenGui
+
+local function createRightSquareButton(yPos: number, bgColor: Color3, iconText: string): TextButton
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.fromOffset(64, 64)
+	btn.Position = UDim2.fromOffset(5, yPos)
+	btn.BackgroundColor3 = bgColor
+	btn.Font = Enum.Font.FredokaOne
+	btn.TextSize = 36
+	btn.Text = iconText
+	btn.Parent = rightPanel
+	addCorner(btn, 10)
+	addStroke(btn, Color3.new(0, 0, 0), 3, Enum.ApplyStrokeMode.Border)
+	return btn
+end
+
+local stonesRightBtn = createRightSquareButton(0, Color3.fromRGB(255, 85, 75), "🪨")
+local swordsRightBtn = createRightSquareButton(80, Color3.fromRGB(255, 150, 55), "⚔️")
+local potionsRightBtn = createRightSquareButton(168, Color3.fromRGB(95, 235, 55), "🧪")
+
+local potionTimerLabel = Instance.new("TextLabel")
+potionTimerLabel.Size = UDim2.fromOffset(84, 22)
+potionTimerLabel.Position = UDim2.fromOffset(-5, 144)
+potionTimerLabel.BackgroundTransparency = 1
+potionTimerLabel.Font = Enum.Font.FredokaOne
+potionTimerLabel.TextColor3 = Color3.fromRGB(255, 70, 50)
+potionTimerLabel.TextScaled = true
+potionTimerLabel.Text = "Boosts"
+potionTimerLabel.Parent = rightPanel
+addStroke(potionTimerLabel, Color3.new(0, 0, 0), 2)
+
+-- ============================================================================
+-- 5. BAS DROITE : PILLULE SOMBRE "🌙 en 3 minutes 50 secondes"
+-- ============================================================================
+local nightPill = Instance.new("Frame")
+nightPill.Size = UDim2.fromOffset(220, 50)
+nightPill.Position = UDim2.new(1, -234, 1, -64)
+nightPill.BackgroundColor3 = Color3.fromRGB(20, 24, 30)
+nightPill.BackgroundTransparency = 0.25
+nightPill.Parent = screenGui
+addCorner(nightPill, 25)
+
+local moonIcon = Instance.new("TextLabel")
+moonIcon.Size = UDim2.fromOffset(42, 42)
+moonIcon.Position = UDim2.fromOffset(10, 4)
+moonIcon.BackgroundTransparency = 1
+moonIcon.Text = "🌙"
+moonIcon.TextScaled = true
+moonIcon.Parent = nightPill
+
+local nightText = Instance.new("TextLabel")
+nightText.Size = UDim2.new(1, -62, 1, -8)
+nightText.Position = UDim2.fromOffset(56, 4)
+nightText.BackgroundTransparency = 1
+nightText.Font = Enum.Font.FredokaOne
+nightText.TextColor3 = Color3.new(1, 1, 1)
+nightText.TextScaled = true
+nightText.Text = "en 3 minutes\n50 secondes"
+nightText.Parent = nightPill
+addStroke(nightText, Color3.new(0, 0, 0), 2)
+
+-- ============================================================================
+-- 6. FENÊTRES MODALES
+-- ============================================================================
+local function createModalWindow(title: string, strokeColor: Color3): (Frame, ScrollingFrame)
+	local modal = Instance.new("Frame")
+	modal.Size = UDim2.fromOffset(540, 405)
+	modal.Position = UDim2.new(0.5, -270, 0.5, -202)
+	modal.BackgroundColor3 = Color3.fromRGB(24, 28, 40)
+	modal.Visible = false
+	modal.Parent = screenGui
+	addCorner(modal, 16)
+	addStroke(modal, strokeColor, 3, Enum.ApplyStrokeMode.Border)
+
+	local header = Instance.new("TextLabel")
+	header.Size = UDim2.new(1, -60, 0, 44)
+	header.Position = UDim2.fromOffset(16, 8)
+	header.BackgroundTransparency = 1
+	header.Font = Enum.Font.FredokaOne
+	header.TextColor3 = strokeColor
+	header.TextXAlignment = Enum.TextXAlignment.Left
+	header.TextSize = 24
+	header.Text = title
+	header.Parent = modal
+	addStroke(header, Color3.new(0, 0, 0), 2)
+
+	local closeBtn = Instance.new("TextButton")
+	closeBtn.Size = UDim2.fromOffset(38, 38)
+	closeBtn.Position = UDim2.new(1, -46, 0, 10)
+	closeBtn.BackgroundColor3 = Color3.fromRGB(235, 55, 55)
+	closeBtn.Font = Enum.Font.FredokaOne
+	closeBtn.TextColor3 = Color3.new(1, 1, 1)
+	closeBtn.TextSize = 22
+	closeBtn.Text = "X"
+	closeBtn.Parent = modal
+	addCorner(closeBtn, 8)
+	closeBtn.MouseButton1Click:Connect(function()
+		modal.Visible = false
+	end)
+
+	local list = Instance.new("ScrollingFrame")
+	list.Size = UDim2.new(1, -24, 1, -68)
+	list.Position = UDim2.fromOffset(12, 56)
+	list.BackgroundTransparency = 1
+	list.ScrollBarThickness = 6
+	list.Parent = modal
+
+	local layout = Instance.new("UIListLayout")
+	layout.Padding = UDim.new(0, 8)
+	layout.Parent = list
+
+	return modal, list
+end
+
+local shopModal, shopList = createModalWindow("🛒 BOUTIQUE & AMÉLIORATIONS", Color3.fromRGB(65, 235, 55))
+local indexModal, indexList = createModalWindow("📘 INDICE DES ÉPÉES (COLLECTION)", Color3.fromRGB(45, 195, 255))
+local invModal, invList = createModalWindow("⚔️ INVENTAIRE & MARCHAND D'ÉPÉES", Color3.fromRGB(255, 180, 45))
+local zonesModal, zonesList = createModalWindow("🪨 LES 10 ZONES & PALIERS DE VITESSE", Color3.fromRGB(255, 85, 75))
+local potionsModal, potionsList = createModalWindow("🧪 POTIONS BOOST (3 MINUTES)", Color3.fromRGB(95, 235, 55))
+local trailsModal, trailsList = createModalWindow("✨ BOUTIQUE DE SENTIERS (TRAÎNÉES)", Color3.fromRGB(55, 225, 255))
+
+local allModals = { shopModal, indexModal, invModal, zonesModal, potionsModal, trailsModal }
+local function toggleModal(target: Frame)
+	local wasVisible = target.Visible
+	for _, m in ipairs(allModals) do
+		m.Visible = false
+	end
+	target.Visible = not wasVisible
+end
+
+local upgradeRows: { [string]: { Label: TextLabel, Btn: TextButton } } = {}
+local upgOrder = { "SpeedLevel", "ForgeSpeed", "CarryStrength", "SlotCount" }
+for _, upgId in ipairs(upgOrder) do
+	local upgInfo = GameConfig.Upgrades[upgId]
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, -10, 0, 68)
+	row.BackgroundColor3 = Color3.fromRGB(36, 42, 58)
+	row.Parent = shopList
+	addCorner(row, 10)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(0.65, -12, 1, -8)
+	lbl.Position = UDim2.fromOffset(10, 4)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.FredokaOne
+	lbl.TextColor3 = Color3.new(1, 1, 1)
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.TextScaled = true
+	lbl.Parent = row
+
+	local buyBtn = Instance.new("TextButton")
+	buyBtn.Size = UDim2.new(0.32, 0, 0, 48)
+	buyBtn.Position = UDim2.new(0.66, 0, 0.5, -24)
+	buyBtn.BackgroundColor3 = Color3.fromRGB(55, 210, 75)
+	buyBtn.Font = Enum.Font.FredokaOne
+	buyBtn.TextColor3 = Color3.new(1, 1, 1)
+	buyBtn.TextScaled = true
+	buyBtn.Parent = row
+	addCorner(buyBtn, 8)
+	addStroke(buyBtn, Color3.new(0, 0, 0), 2, Enum.ApplyStrokeMode.Border)
+
+	buyBtn.MouseButton1Click:Connect(function()
+		ActionEvent:FireServer("BuyUpgrade", upgId)
+	end)
+
+	upgradeRows[upgId] = { Label = lbl, Btn = buyBtn }
+end
+shopList.CanvasSize = UDim2.fromOffset(0, #upgOrder * 78)
+
+local trailRows: { [string]: TextButton } = {}
+for _, tInfo in ipairs(GameConfig.Trails) do
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, -10, 0, 68)
+	row.BackgroundColor3 = Color3.fromRGB(36, 42, 58)
+	row.Parent = trailsList
+	addCorner(row, 10)
+	addStroke(row, tInfo.Color1, 1.5, Enum.ApplyStrokeMode.Border)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(0.65, -12, 1, -8)
+	lbl.Position = UDim2.fromOffset(10, 4)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.FredokaOne
+	lbl.TextColor3 = tInfo.Color1
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.TextScaled = true
+	lbl.Text = string.format(
+		"✨ %s\n👟 x%.2f Vitesse   |   💵 x%.2f Argent",
+		tInfo.Name,
+		tInfo.SpeedMultiplier,
+		tInfo.MoneyMultiplier
+	)
+	lbl.Parent = row
+
+	local buyBtn = Instance.new("TextButton")
+	buyBtn.Size = UDim2.new(0.32, 0, 0, 48)
+	buyBtn.Position = UDim2.new(0.66, 0, 0.5, -24)
+	buyBtn.BackgroundColor3 = Color3.fromRGB(55, 200, 95)
+	buyBtn.Font = Enum.Font.FredokaOne
+	buyBtn.TextColor3 = Color3.new(1, 1, 1)
+	buyBtn.TextScaled = true
+	buyBtn.Text = "$" .. GameConfig.FormatNumber(tInfo.Price)
+	buyBtn.Parent = row
+	addCorner(buyBtn, 8)
+	addStroke(buyBtn, Color3.new(0, 0, 0), 2, Enum.ApplyStrokeMode.Border)
+
+	buyBtn.MouseButton1Click:Connect(function()
+		ActionEvent:FireServer("BuyOrEquipTrail", tInfo.Id)
+	end)
+
+	trailRows[tInfo.Id] = buyBtn
+end
+trailsList.CanvasSize = UDim2.fromOffset(0, #GameConfig.Trails * 78)
+
+for _, tier in ipairs(GameConfig.StoneTiers) do
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, -10, 0, 64)
+	row.BackgroundColor3 = Color3.fromRGB(36, 42, 58)
+	row.Parent = zonesList
+	addCorner(row, 10)
+	addStroke(row, tier.CrystalColor, 1.5, Enum.ApplyStrokeMode.Border)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, -20, 1, -8)
+	lbl.Position = UDim2.fromOffset(10, 4)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.FredokaOne
+	lbl.TextColor3 = tier.CrystalColor
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.TextScaled = true
+	lbl.Text = string.format(
+		"%s ($%s - $%s/s)\n⏳ Éclosion : %s  |  ⚔️ %s (Vitesse : %s)",
+		tier.ZoneName,
+		GameConfig.FormatNumber(tier.MinBaseMoneyPerSec),
+		GameConfig.FormatNumber(tier.MaxBaseMoneyPerSec * 3),
+		GameConfig.FormatTime(tier.ForgeTime),
+		tier.GuardianName,
+		GameConfig.FormatNumber(tier.GuardianSpeedStat)
+	)
+	lbl.Parent = row
+end
+zonesList.CanvasSize = UDim2.fromOffset(0, #GameConfig.StoneTiers * 74)
+
+local potionTypes = {
+	{ Id = "Speed", Title = "🧪 Potion x2 Vitesse (3 minutes)", Color = Color3.fromRGB(55, 195, 255) },
+	{ Id = "Money", Title = "🧪 Potion x2 Argent $/s (3 minutes)", Color = Color3.fromRGB(75, 235, 95) },
+}
+for _, pInfo in ipairs(potionTypes) do
+	local row = Instance.new("Frame")
+	row.Size = UDim2.new(1, -10, 0, 68)
+	row.BackgroundColor3 = Color3.fromRGB(36, 42, 58)
+	row.Parent = potionsList
+	addCorner(row, 10)
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(0.65, -12, 1, -8)
+	lbl.Position = UDim2.fromOffset(10, 4)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.FredokaOne
+	lbl.TextColor3 = pInfo.Color
+	lbl.TextXAlignment = Enum.TextXAlignment.Left
+	lbl.TextScaled = true
+	lbl.Text = pInfo.Title
+	lbl.Parent = row
+
+	local btn = Instance.new("TextButton")
+	btn.Size = UDim2.new(0.32, 0, 0, 48)
+	btn.Position = UDim2.new(0.66, 0, 0.5, -24)
+	btn.BackgroundColor3 = pInfo.Color
+	btn.Font = Enum.Font.FredokaOne
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.TextScaled = true
+	btn.Text = "$500"
+	btn.Parent = row
+	addCorner(btn, 8)
+	addStroke(btn, Color3.new(0, 0, 0), 2, Enum.ApplyStrokeMode.Border)
+
+	btn.MouseButton1Click:Connect(function()
+		ActionEvent:FireServer("ActivatePotion", pInfo.Id)
+	end)
+end
+
+-- ============================================================================
+-- 7. CARTE D'ÉCLOSION D'ÉPÉE & NOTIFICATIONS
+-- ============================================================================
+local revealCard = Instance.new("Frame")
+revealCard.Size = UDim2.fromOffset(400, 225)
+revealCard.Position = UDim2.new(0.5, -200, 0.25, 0)
+revealCard.BackgroundColor3 = Color3.fromRGB(20, 24, 36)
+revealCard.Visible = false
+revealCard.Parent = screenGui
+addCorner(revealCard, 18)
+local revealStroke = addStroke(revealCard, Color3.fromRGB(255, 215, 55), 3.5, Enum.ApplyStrokeMode.Border)
+
+local revealTitle = Instance.new("TextLabel")
+revealTitle.Size = UDim2.new(1, -20, 0, 38)
+revealTitle.Position = UDim2.fromOffset(10, 10)
+revealTitle.BackgroundTransparency = 1
+revealTitle.Font = Enum.Font.FredokaOne
+revealTitle.TextColor3 = Color3.fromRGB(255, 235, 110)
+revealTitle.TextScaled = true
+revealTitle.Text = "✨ ÉCLOSION DE LA PIERRE ! ✨"
+revealTitle.Parent = revealCard
+
+local revealName = Instance.new("TextLabel")
+revealName.Size = UDim2.new(1, -20, 0, 58)
+revealName.Position = UDim2.fromOffset(10, 52)
+revealName.BackgroundTransparency = 1
+revealName.Font = Enum.Font.FredokaOne
+revealName.TextScaled = true
+revealName.Parent = revealCard
+addStroke(revealName, Color3.new(0, 0, 0), 2.5)
+
+local revealStats = Instance.new("TextLabel")
+revealStats.Size = UDim2.new(1, -20, 0, 44)
+revealStats.Position = UDim2.fromOffset(10, 116)
+revealStats.BackgroundTransparency = 1
+revealStats.Font = Enum.Font.FredokaOne
+revealStats.TextColor3 = Color3.fromRGB(75, 255, 95)
+revealStats.TextScaled = true
+revealStats.Parent = revealCard
+addStroke(revealStats, Color3.new(0, 0, 0), 2)
+
+local okBtn = Instance.new("TextButton")
+okBtn.Size = UDim2.fromOffset(140, 36)
+okBtn.Position = UDim2.new(0.5, -70, 1, -44)
+okBtn.BackgroundColor3 = Color3.fromRGB(60, 215, 85)
+okBtn.Font = Enum.Font.FredokaOne
+okBtn.TextColor3 = Color3.new(1, 1, 1)
+okBtn.TextSize = 20
+okBtn.Text = "Super !"
+okBtn.Parent = revealCard
+addCorner(okBtn, 8)
+okBtn.MouseButton1Click:Connect(function()
+	revealCard.Visible = false
+end)
+
+local notifContainer = Instance.new("Frame")
+notifContainer.Size = UDim2.fromOffset(520, 120)
+notifContainer.Position = UDim2.new(0.5, -260, 1, -155)
+notifContainer.BackgroundTransparency = 1
+notifContainer.Parent = screenGui
+
+local notifLayout = Instance.new("UIListLayout")
+notifLayout.VerticalAlignment = Enum.VerticalAlignment.Bottom
+notifLayout.Padding = UDim.new(0, 6)
+notifLayout.Parent = notifContainer
+
+local function showNotification(msg: string, color: Color3)
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 0, 34)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.FredokaOne
+	lbl.TextColor3 = color
+	lbl.TextScaled = true
+	lbl.Text = msg
+	lbl.Parent = notifContainer
+	addStroke(lbl, Color3.new(0, 0, 0), 2.5)
+
+	task.delay(3.5, function()
+		local tw = TweenService:Create(lbl, TweenInfo.new(0.4), { TextTransparency = 1 })
+		tw:Play()
+		tw.Completed:Wait()
+		lbl:Destroy()
+	end)
+end
+
+-- ============================================================================
+-- 8. RAFRAÎCHISSEMENT DE L'INTERFACE
+-- ============================================================================
+local function refreshUI()
+	-- Gain hors ligne fortement réduit (ex: $29/s -> ~$5.2K/jour hors ligne au lieu de >$2.5M)
+	local dailyOffline = math.floor(currentState.MoneyPerSec * 180)
+	offlineLabel.Text = string.format("Vous gagnez $%s/jour hors ligne ! 😈", GameConfig.FormatNumber(dailyOffline))
+
+	if currentState.TrailSpeedMult > 1.0 then
+		speedValueLabel.Text = string.format("%s (x%.2f)", GameConfig.FormatNumber(currentState.TotalSpeed), currentState.TrailSpeedMult)
+	else
+		speedValueLabel.Text = GameConfig.FormatNumber(currentState.TotalSpeed)
+	end
+	moneyValueLabel.Text = "$" .. GameConfig.FormatNumber(currentState.Money)
+
+	if currentState.SlowMode then
+		slowKnob.Position = UDim2.fromOffset(41, 3)
+		slowKnob.BackgroundColor3 = Color3.fromRGB(255, 210, 50)
+	else
+		slowKnob.Position = UDim2.fromOffset(3, 3)
+		slowKnob.BackgroundColor3 = Color3.fromRGB(75, 240, 45)
+	end
+
+	local nm = math.floor(currentState.NightRemaining / 60)
+	local ns = currentState.NightRemaining % 60
+	nightText.Text = string.format("en %d minutes\n%d secondes", nm, ns)
+
+	if currentState.PotionRemaining > 0 then
+		potionTimerLabel.Text = GameConfig.FormatTime(currentState.PotionRemaining)
+	else
+		potionTimerLabel.Text = "Boosts"
+	end
+
+	for _, upgId in ipairs(upgOrder) do
+		local upgInfo = GameConfig.Upgrades[upgId]
+		local row = upgradeRows[upgId]
+		local lvl = (currentState.Upgrades :: any)[upgId] or 1
+		row.Label.Text = string.format("%s (Niv. %d/%d)\n%s", upgInfo.Name, lvl, upgInfo.MaxLevel, upgInfo.Description)
+		if lvl >= upgInfo.MaxLevel then
+			row.Btn.Text = "MAX"
+			row.Btn.BackgroundColor3 = Color3.fromRGB(100, 105, 120)
+		else
+			local cost = GameConfig.GetUpgradeCost(upgId, lvl)
+			row.Btn.Text = "$" .. GameConfig.FormatNumber(cost)
+			row.Btn.BackgroundColor3 = if currentState.Money >= cost
+				then Color3.fromRGB(55, 215, 75)
+				else Color3.fromRGB(165, 60, 60)
+		end
+	end
+
+	for _, tInfo in ipairs(GameConfig.Trails) do
+		local btn = trailRows[tInfo.Id]
+		if btn then
+			if currentState.EquippedTrailId == tInfo.Id then
+				btn.Text = "Équipée"
+				btn.BackgroundColor3 = Color3.fromRGB(55, 175, 255)
+			elseif currentState.OwnedTrails[tInfo.Id] then
+				btn.Text = "Équiper"
+				btn.BackgroundColor3 = Color3.fromRGB(65, 210, 95)
+			else
+				btn.Text = "$" .. GameConfig.FormatNumber(tInfo.Price)
+				btn.BackgroundColor3 = if currentState.Money >= tInfo.Price
+					then Color3.fromRGB(55, 215, 75)
+					else Color3.fromRGB(165, 60, 60)
+			end
+		end
+	end
+
+	for _, c in ipairs(indexList:GetChildren()) do
+		if c:IsA("Frame") then
+			c:Destroy()
+		end
+	end
+	for _, sInfo in pairs(GameConfig.Swords) do
+		local rInfo = GameConfig.Rarities[sInfo.Rarity]
+		local unlocked = currentState.Discovered[sInfo.Id] == true
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, -10, 0, 50)
+		row.BackgroundColor3 = if unlocked then Color3.fromRGB(36, 44, 62) else Color3.fromRGB(22, 24, 32)
+		row.Parent = indexList
+		addCorner(row, 8)
+		addStroke(row, if unlocked then rInfo.Color else Color3.fromRGB(70, 75, 85), 1.5, Enum.ApplyStrokeMode.Border)
+
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.new(1, -20, 1, -8)
+		lbl.Position = UDim2.fromOffset(10, 4)
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.FredokaOne
+		lbl.TextColor3 = if unlocked then rInfo.Color else Color3.fromRGB(130, 135, 145)
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.TextScaled = true
+		lbl.Text = if unlocked
+			then string.format("✅ [%s] %s (Débloquée !)", rInfo.Name, sInfo.Name)
+			else string.format("🔒 [%s] ??? (Éclos une Pierre pour découvrir)", rInfo.Name)
+		lbl.Parent = row
+	end
+
+	for _, c in ipairs(invList:GetChildren()) do
+		if c:IsA("Frame") then
+			c:Destroy()
+		end
+	end
+
+	local sortedInv = table.clone(currentState.Inventory)
+	table.sort(sortedInv, function(a, b)
+		return a.MoneyPerSec > b.MoneyPerSec
+	end)
+
+	for _, item in ipairs(sortedInv) do
+		local rInfo = GameConfig.Rarities[item.Rarity] or GameConfig.Rarities.Common
+		local isPlaced = currentState.PlacedSwordUids[item.Uid] == true
+		local row = Instance.new("Frame")
+		row.Size = UDim2.new(1, -10, 0, 64)
+		row.BackgroundColor3 = Color3.fromRGB(36, 42, 58)
+		row.Parent = invList
+		addCorner(row, 10)
+		addStroke(row, rInfo.Color, 1.5, Enum.ApplyStrokeMode.Border)
+
+		local lbl = Instance.new("TextLabel")
+		lbl.Size = UDim2.new(0.52, -10, 1, -8)
+		lbl.Position = UDim2.fromOffset(10, 4)
+		lbl.BackgroundTransparency = 1
+		lbl.Font = Enum.Font.FredokaOne
+		lbl.TextColor3 = rInfo.Color
+		lbl.TextXAlignment = Enum.TextXAlignment.Left
+		lbl.TextScaled = true
+		lbl.Text = string.format(
+			"[%s] %s\n+$%s/s (%s)",
+			rInfo.Name,
+			item.Name,
+			GameConfig.FormatNumber(item.MoneyPerSec),
+			if isPlaced then "Posée Base" else "En Sac"
+		)
+		lbl.Parent = row
+
+		local placeBtn = Instance.new("TextButton")
+		placeBtn.Size = UDim2.new(0.21, 0, 0, 44)
+		placeBtn.Position = UDim2.new(0.53, 0, 0.5, -22)
+		placeBtn.BackgroundColor3 = if isPlaced then Color3.fromRGB(70, 155, 235) else Color3.fromRGB(65, 200, 85)
+		placeBtn.Font = Enum.Font.FredokaOne
+		placeBtn.TextColor3 = Color3.new(1, 1, 1)
+		placeBtn.TextScaled = true
+		placeBtn.Text = if isPlaced then "Ranger Sac" else "Poser Base"
+		placeBtn.Parent = row
+		addCorner(placeBtn, 8)
+		placeBtn.MouseButton1Click:Connect(function()
+			ActionEvent:FireServer("TogglePlaceSword", item.Uid)
+		end)
+
+		local sellBtn = Instance.new("TextButton")
+		sellBtn.Size = UDim2.new(0.22, 0, 0, 44)
+		sellBtn.Position = UDim2.new(0.76, 0, 0.5, -22)
+		sellBtn.BackgroundColor3 = Color3.fromRGB(235, 145, 35)
+		sellBtn.Font = Enum.Font.FredokaOne
+		sellBtn.TextColor3 = Color3.new(1, 1, 1)
+		sellBtn.TextScaled = true
+		sellBtn.Text = "Vendre\n$" .. GameConfig.FormatNumber(item.SellPrice)
+		sellBtn.Parent = row
+		addCorner(sellBtn, 8)
+		sellBtn.MouseButton1Click:Connect(function()
+			ActionEvent:FireServer("SellSword", item.Uid)
+		end)
+	end
+	invList.CanvasSize = UDim2.fromOffset(0, #sortedInv * 72)
+end
+
+shopBtn.MouseButton1Click:Connect(function()
+	toggleModal(shopModal)
+end)
+plusSpeedBtn.MouseButton1Click:Connect(function()
+	toggleModal(trailsModal)
+end)
+indexBtn.MouseButton1Click:Connect(function()
+	toggleModal(indexModal)
+end)
+stonesRightBtn.MouseButton1Click:Connect(function()
+	toggleModal(zonesModal)
+end)
+swordsRightBtn.MouseButton1Click:Connect(function()
+	toggleModal(invModal)
+end)
+potionsRightBtn.MouseButton1Click:Connect(function()
+	toggleModal(potionsModal)
+end)
+slowToggleBtn.MouseButton1Click:Connect(function()
+	ActionEvent:FireServer("ToggleSlowMode")
+end)
+spawnTreadmillBtn.MouseButton1Click:Connect(function()
+	ActionEvent:FireServer("SpawnTreadmill")
+end)
+
+UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+	if processed then
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.T then
+		ActionEvent:FireServer("SpawnTreadmill")
+	end
+end)
+
+OpenMerchantEvent.OnClientEvent:Connect(function(merchantType: string)
+	for _, m in ipairs(allModals) do
+		m.Visible = false
+	end
+	if merchantType == "SellSwords" then
+		invModal.Visible = true
+	elseif merchantType == "TrailsShop" then
+		trailsModal.Visible = true
+	end
+end)
+
+StateUpdateEvent.OnClientEvent:Connect(function(newState)
+	currentState = newState
+	refreshUI()
+end)
+
+NotificationEvent.OnClientEvent:Connect(function(msg: string, color: Color3)
+	showNotification(msg, color)
+end)
+
+SwordRevealEvent.OnClientEvent:Connect(function(data)
+	revealStroke.Color = data.RarityColor
+	revealName.Text = string.format("[%s]\n%s", data.Rarity, data.Name)
+	revealName.TextColor3 = data.RarityColor
+	revealStats.Text = string.format(
+		"💵 Revenu aléatoire : +$%s / sec\n(Passe sur le bouton vert devant l'épée pour récolter !)",
+		GameConfig.FormatNumber(data.MoneyPerSec)
+	)
+	revealCard.Visible = true
+end)
+
+PopupEvent.OnClientEvent:Connect(function(popupType: string, textValue: string)
+	local isMoney = (popupType == "Money")
+	local count = if isMoney then 1 else 2
+	for i = 1, count do
+		task.delay((i - 1) * 0.12, function()
+			local pop = Instance.new("TextLabel")
+			pop.Size = UDim2.fromOffset(190, 46)
+			local rx = math.random(-120, 120)
+			local ry = math.random(-60, 40)
+			pop.Position = UDim2.new(0.5, rx - 95, 0.45, ry)
+			pop.BackgroundTransparency = 1
+			pop.Font = Enum.Font.FredokaOne
+			pop.TextColor3 = if isMoney then Color3.fromRGB(65, 255, 75) else Color3.fromRGB(255, 55, 225)
+			pop.TextScaled = true
+			pop.Text = if isMoney then ("💵 " .. textValue) else ("👟 " .. textValue)
+			pop.Parent = screenGui
+			addStroke(pop, Color3.new(0, 0, 0), 2.5)
+
+			local tw = TweenService:Create(
+				pop,
+				TweenInfo.new(0.85, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ Position = pop.Position - UDim2.fromOffset(0, 65), TextTransparency = 1 }
+			)
+			tw:Play()
+			tw.Completed:Wait()
+			pop:Destroy()
+		end)
+	end
+end)
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+  <Item class="Workspace" referent="10">
+    <Properties>
+      <string name="Name">Workspace</string>
+      <bool name="FilteringEnabled">true</bool>
+      <bool name="NeedsPivotMigration">false</bool>
+    </Properties>
+    <Item class="Part" referent="11">
+      <Properties>
+        <string name="Name">Baseplate</string>
+        <bool name="Anchored">true</bool>
+        <Color3uint8 name="Color3uint8">4228938</Color3uint8>
+        <token name="Material">1280</token>
+        <Vector3 name="Position">
+          <X>0</X>
+          <Y>-4</Y>
+          <Z>0</Z>
+        </Vector3>
+        <Vector3 name="size">
+          <X>600</X>
+          <Y>8</Y>
+          <Z>600</Z>
+        </Vector3>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>
